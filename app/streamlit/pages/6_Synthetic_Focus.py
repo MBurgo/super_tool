@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st, json, pandas as pd
 from core.synthetic_focus import evaluate_copy_across_personas
 from core.models import Persona
