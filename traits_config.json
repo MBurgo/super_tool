@@ -1,0 +1,66 @@
+{
+  "Urgency": {
+    "high_threshold": 8,
+    "low_threshold": 3,
+    "high_rule": "- Include a clear deadline phrase in both the headline/subject **and** the CTA (e.g., “midnight”, an explicit date, “today only”).",
+    "mid_rule": "- Refer to timing **once only** and avoid hard countdowns; no explicit deadlines.",
+    "low_rule": "- Avoid countdowns, deadline words, scarcity cues or time‑pressure phrases.",
+    "high_exemplar_allowed": true
+  },
+  "Data_Richness": {
+    "high_threshold": 7,
+    "low_threshold": 3,
+    "high_rule": "- Include one concrete, approved figure (e.g., member count or price) with context. No performance promises.",
+    "mid_rule": "- Use a light data point (ranking or single count).",
+    "low_rule": "- Avoid statistics and dollar figures; rely on qualitative proof.",
+    "high_exemplar_allowed": false
+  },
+  "Social_Proof": {
+    "high_threshold": 6,
+    "low_threshold": 3,
+    "high_rule": "- Provide three credibility builders (testimonial snippet, verified member count, third‑party mention).",
+    "mid_rule": "- Include one credibility builder.",
+    "low_rule": "- Omit testimonials and awards.",
+    "high_exemplar_allowed": false
+  },
+  "Conversational_Tone": {
+    "high_threshold": 8,
+    "low_threshold": 3,
+    "high_rule": "- Write in second‑person, use contractions and short, friendly sentences.",
+    "mid_rule": "- Use neutral language; avoid informal openings and rhetorical questions.",
+    "low_rule": "- Write in third‑person; avoid contractions.",
+    "high_exemplar_allowed": false
+  },
+  "Imagery": {
+    "high_threshold": 8,
+    "low_threshold": 3,
+    "high_rule": "- Use one vivid metaphor to illustrate a point.",
+    "mid_rule": "- Allow one mild descriptive phrase; otherwise literal language.",
+    "low_rule": "- Avoid metaphors; keep language literal.",
+    "high_exemplar_allowed": false
+  },
+  "Comparative_Framing": {
+    "high_threshold": 7,
+    "low_threshold": 3,
+    "high_rule": "- Draw a prudent historical comparison with clear limits (no 'next Tesla' hype).",
+    "mid_rule": "- Use a single light comparison without story beats.",
+    "low_rule": "- No historical comparisons; focus on present value.",
+    "high_exemplar_allowed": false
+  },
+  "FOMO": {
+    "high_threshold": 7,
+    "low_threshold": 3,
+    "high_rule": "- Mention the emotional cost of missing out without fearmongering.",
+    "mid_rule": "- Note the offer may not last, without regret language.",
+    "low_rule": "- Avoid FOMO language entirely.",
+    "high_exemplar_allowed": false
+  },
+  "Repetition": {
+    "high_threshold": 6,
+    "low_threshold": 2,
+    "high_rule": "- Reinforce the main offer with up to two deliberate repeats.",
+    "mid_rule": "- Restate the offer once in different words.",
+    "low_rule": "- State each point once; avoid repeated phrases.",
+    "high_exemplar_allowed": false
+  }
+}
