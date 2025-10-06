@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st, json
 from adapters.trends_google_sheets_adapter import build_trendbriefs_from_sheet
 from utils.store import save_json
