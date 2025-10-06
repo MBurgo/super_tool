@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st
 st.set_page_config(page_title="Marketing Super-Tool v4", page_icon="🛠️", layout="wide")
 st.title("Marketing Super-Tool v4")
