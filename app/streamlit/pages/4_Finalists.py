@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st
 from pathlib import Path
 from utils.store import load_json
