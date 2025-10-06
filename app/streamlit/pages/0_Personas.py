@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st, json, tempfile, os
 from adapters.personas_portal_adapter import load_and_expand
 from utils.store import save_json
