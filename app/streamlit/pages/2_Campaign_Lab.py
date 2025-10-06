@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st, json, pathlib
 from utils.store import load_json, save_json
 from core.models import Persona
