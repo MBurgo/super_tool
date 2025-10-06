@@ -1,4 +1,4 @@
-import app.streamlit._bootstrap as _bootstrap
+import _bootstrap
 import streamlit as st, json
 from adapters.copywriter_mf_adapter import generate as gen_copy
 from utils.store import load_json
