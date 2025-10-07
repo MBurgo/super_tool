@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import time
 import asyncio
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 
 import httpx
 from bs4 import BeautifulSoup
@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover
     st = None  # type: ignore
 
+ADAPTER_VERSION = "2025-10-07b"
 SERP_ENDPOINT = "https://serpapi.com/search.json"
 
 BROWSER_HEADERS = {
@@ -25,44 +26,27 @@ BROWSER_HEADERS = {
     )
 }
 
-def _secrets_try_get(section: str, key: str) -> str | None:
-    if st is None:
-        return None
-    try:
-        sec = None
+def _nested_get(mapping: Any, keys: List[str]) -> Optional[Any]:
+    """
+    Safely walk nested keys on mapping-like objects that may not behave like dicts.
+    Never assumes truthiness equals existence.
+    """
+    cur = mapping
+    for k in keys:
+        nxt = None
+        # Try index style
         try:
-            sec = st.secrets[section]  # type: ignore[index]
+            nxt = cur[k]  # type: ignore[index]
         except Exception:
+            # Try .get if available
             try:
-                sec = st.secrets.get(section)  # type: ignore[attr-defined]
-            except Exception:
-                sec = None
-        if not sec:
-            return None
-        # section may behave like a dict or a mapping-like object
-        try:
-            val = sec[key]  # type: ignore[index]
-            return str(val) if val else None
-        except Exception:
-            try:
-                val = sec.get(key)  # type: ignore[attr-defined]
-                return str(val) if val else None
+                nxt = cur.get(k)  # type: ignore[attr-defined]
             except Exception:
                 return None
-    except Exception:
-        return None
-
-def _secrets_try_flat(name: str) -> str | None:
-    if st is None:
-        return None
-    try:
-        try:
-            val = st.secrets[name]  # type: ignore[index]
-        except Exception:
-            val = st.secrets.get(name)  # type: ignore[attr-defined]
-        return str(val) if val else None
-    except Exception:
-        return None
+        cur = nxt
+        if cur is None:
+            return None
+    return cur
 
 def get_serpapi_key() -> str | None:
     """
@@ -73,19 +57,46 @@ def get_serpapi_key() -> str | None:
     # 1) Env (most reliable on Streamlit Cloud)
     for name in ("SERPAPI_API_KEY", "SERP_API_KEY", "serpapi_api_key"):
         val = os.environ.get(name)
-        if val:
-            return val
+        if isinstance(val, str) and val.strip():
+            return val.strip()
 
-    # 2) Secrets (guarded)
-    val = _secrets_try_get("serpapi", "api_key")
-    if val:
-        return val
-    for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
-        val = _secrets_try_flat(name)
-        if val:
-            return val
+    # 2) Secrets (guarded, don't rely on truthiness of sections)
+    if st is not None:
+        sec_val = _nested_get(st.secrets, ["serpapi", "api_key"])  # type: ignore[arg-type]
+        if isinstance(sec_val, str) and sec_val.strip():
+            return sec_val.strip()
+
+        # Flat top-level fallbacks
+        for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
+            v = _nested_get(st.secrets, [name])  # type: ignore[arg-type]
+            if isinstance(v, str) and v.strip():
+                return v.strip()
 
     return None
+
+def serp_key_diagnostics() -> Dict[str, Any]:
+    """
+    Non-sensitive diagnostics to help verify where a key would be read from.
+    Does NOT return the key, just booleans and lengths.
+    """
+    env = {
+        "SERPAPI_API_KEY": len(os.environ.get("SERPAPI_API_KEY", "")) or 0,
+        "SERP_API_KEY": len(os.environ.get("SERP_API_KEY", "")) or 0,
+        "serpapi_api_key": len(os.environ.get("serpapi_api_key", "")) or 0,
+    }
+    secrets = {"[serpapi].api_key": 0, "serpapi_api_key": 0, "SERPAPI_API_KEY": 0, "SERP_API_KEY": 0}
+    if st is not None:
+        v = _nested_get(st.secrets, ["serpapi", "api_key"])  # type: ignore[arg-type]
+        secrets["[serpapi].api_key"] = len(v) if isinstance(v, str) else 0
+        for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
+            t = _nested_get(st.secrets, [name])  # type: ignore[arg-type]
+            secrets[name] = len(t) if isinstance(t, str) else 0
+    return {
+        "adapter_version": ADAPTER_VERSION,
+        "module_path": __file__,
+        "env_value_lengths": env,
+        "secrets_value_lengths": secrets,
+    }
 
 def _serp_get(params: Dict[str, Any], api_key: str, tries: int = 4, timeout: float = 30.0) -> Dict[str, Any]:
     """
@@ -243,7 +254,9 @@ def enrich_news_with_meta(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 __all__ = [
+    "ADAPTER_VERSION",
     "get_serpapi_key",
+    "serp_key_diagnostics",
     "fetch_trends_and_news",
     "fetch_meta_descriptions",
     "enrich_news_with_meta",
