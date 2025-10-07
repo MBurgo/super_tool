@@ -1,6 +1,7 @@
 # app/streamlit/pages/1B_Trends_from_Sheets.py
-import _bootstrap  # keeps absolute imports working on Streamlit Cloud
+import _bootstrap  # sets up sys.path for "adapters", "core", "utils"
 import json, os
+from pathlib import Path
 import streamlit as st
 
 from adapters.trends_google_sheets_adapter import build_trendbriefs_from_sheet
@@ -8,157 +9,101 @@ from adapters.trends_google_sheets_adapter import build_trendbriefs_from_sheet
 st.title("Trends (Google Sheets)")
 st.caption("Pulls data from your existing spreadsheet and converts to TrendBriefs.")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Safe access helpers — avoid `in st.secrets` so we don't trigger parser errors
-# ─────────────────────────────────────────────────────────────────────────────
-def get_secret_or_env(secret_path, env_var, default=None):
-    """
-    Try to fetch a value from st.secrets using a dotted path like 'google.spreadsheet_id'.
-    If secrets are missing or the key doesn't exist, fall back to os.environ[env_var].
-    """
-    # 1) Try secrets
-    try:
-        parts = secret_path.split(".")
-        cur = st.secrets
-        for p in parts:
-            cur = cur[p]  # will raise if any level is missing or secrets file absent
-        return cur
-    except Exception:
-        pass
-
-    # 2) Try environment
-    val = os.getenv(env_var)
-    return val if val else default
-
-
-def get_service_account_dict():
-    """
-    Return a dict for the GCP service account.
-    Sources (in order):
-      - st.secrets["service_account"] (if present)
-      - os.environ["SERVICE_ACCOUNT_JSON"] (full JSON blob)
-      - None (handled by UI paste field)
-    """
-    # Try st.secrets
-    try:
-        sa = st.secrets["service_account"]
-        # st.secrets mapping is already dict-like
-        return dict(sa)
-    except Exception:
-        pass
-
-    # Try env var
-    raw = os.getenv("SERVICE_ACCOUNT_JSON")
-    if raw:
+# ---------- helpers ----------
+def _default_sheet_id() -> str:
+    # Prefer secrets; fall back to env; finally optional file in repo
+    for key in ("GOOGLE_TRENDS_SHEET_ID", "SPREADSHEET_ID"):
         try:
-            return json.loads(raw)
+            val = st.secrets[key]  # works on Streamlit Cloud
+            if val:
+                return str(val).strip()
         except Exception:
             pass
+    sid = os.getenv("GOOGLE_TRENDS_SHEET_ID") or os.getenv("SPREADSHEET_ID")
+    if sid:
+        return sid.strip()
+    sid_file = Path("assets/sheet_id.txt")
+    return sid_file.read_text(encoding="utf-8").strip() if sid_file.exists() else ""
 
-    return None
+def _default_service_account_json_text() -> str:
+    # 1) secrets as mapping (recommended)
+    try:
+        sa = st.secrets["service_account"]  # [service_account] block in secrets.toml
+        if isinstance(sa, dict):
+            # Convert to a plain dict (st.Secrets is mapping-like) then JSON
+            sa_dict = {k: sa[k] for k in sa.keys()}
+            return json.dumps(sa_dict, ensure_ascii=False, indent=2)
+        if isinstance(sa, str) and sa.strip().startswith("{"):
+            return sa.strip()
+    except Exception:
+        pass
 
+    # 2) secrets as raw string (less common)
+    try:
+        raw = st.secrets["SERVICE_ACCOUNT_JSON"]
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    except Exception:
+        pass
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pre-fill inputs from secrets/env when available
-# ─────────────────────────────────────────────────────────────────────────────
-spreadsheet_id = get_secret_or_env(
-    "google.spreadsheet_id",
-    "GOOGLE_SHEETS_SPREADSHEET_ID",
-    default=""
-)
-sa_guess = get_service_account_dict()
-sa_text_default = json.dumps(sa_guess, indent=2) if sa_guess else ""
+    # 3) env variables
+    for env_key in ("SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON"):
+        v = os.getenv(env_key)
+        if v and v.strip():
+            return v.strip()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UI – connection pane
-# ─────────────────────────────────────────────────────────────────────────────
-st.subheader("Connect Google Sheets")
+    # 4) repo fallbacks (optional)
+    for p in ("assets/service_account.json", "data/service_account.json"):
+        fp = Path(p)
+        if fp.exists():
+            return fp.read_text(encoding="utf-8")
 
-spreadsheet_id = st.text_input(
+    return ""  # nothing found
+
+# ---------- UI ----------
+sheet_id = st.text_input(
     "Spreadsheet ID",
-    value=spreadsheet_id,
-    help="The long ID from your Google Sheet URL (between /d/ and /edit)."
+    value=_default_sheet_id(),
+    help="The long key from your Google Sheets URL.",
 )
 
-st.markdown(
-    "Provide a Service Account JSON below (auto‑filled if present in secrets or env)."
-)
-sa_text = st.text_area(
-    "Service Account JSON",
-    value=sa_text_default,
-    height=220,
-    help="Paste the full JSON for your GCP service account. "
-         "Alternatively, set [service_account] in Streamlit secrets "
-         "or SERVICE_ACCOUNT_JSON env var."
-)
+sa_json_text = _default_service_account_json_text()
+has_sa = bool(sa_json_text.strip())
 
-colA, colB = st.columns([1, 3])
-run_btn = colA.button("Load Briefs", type="primary")
+st.checkbox("Show raw Service Account JSON (sensitive)", value=False, key="show_sa_json")
+if st.session_state.show_sa_json:
+    st.text_area("Service Account JSON", value=sa_json_text, height=220)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Action – build briefs
-# ─────────────────────────────────────────────────────────────────────────────
-if run_btn:
-    if not spreadsheet_id.strip():
+if st.button("Connect & Load Trends", type="primary"):
+    if not sheet_id.strip():
         st.error("Please provide a Spreadsheet ID.")
         st.stop()
 
-    sa_dict = None
-    if sa_text.strip():
+    sa_info = None
+    if has_sa:
         try:
-            sa_dict = json.loads(sa_text)
+            sa_info = json.loads(sa_json_text)
         except json.JSONDecodeError as e:
-            st.error(f"Service Account JSON is not valid JSON: {e}")
+            st.error(f"Your Service Account JSON is not valid JSON: {e}")
             st.stop()
-    else:
-        # If textarea empty, try to recover from secrets/env again
-        sa_dict = get_service_account_dict()
 
-    if not sa_dict:
-        st.error("No Service Account credentials provided. Paste the JSON or add it to secrets/env.")
-        st.stop()
-
-    with st.spinner("Reading sheets and building briefs…"):
+    with st.spinner("Connecting to Google Sheets and building TrendBriefs…"):
         try:
-            # The adapter should handle creating the gspread client from sa_dict internally.
-            briefs = build_trendbriefs_from_sheet(
-                spreadsheet_id=spreadsheet_id,
-                service_account=sa_dict,
-            )
+            # Support both adapter signatures
+            try:
+                briefs = build_trendbriefs_from_sheet(sheet_id, service_account_info=sa_info)
+            except TypeError:
+                briefs = build_trendbriefs_from_sheet(sheet_id, service_account=sa_info)
         except Exception as e:
-            st.exception(e)
+            st.error(f"Failed to load from Google Sheets: {e}")
             st.stop()
 
-    if not briefs:
-        st.warning("No briefs were produced from the spreadsheet.")
-    else:
-        st.success(f"Loaded {len(briefs)} brief(s).")
-
-        for i, b in enumerate(briefs, 1):
-            with st.expander(f"Brief {i}", expanded=(i == 1)):
-                # Render gracefully whether adapter returns pydantic model or dict
-                try:
-                    payload = b.model_dump()  # pydantic v2
-                except Exception:
-                    try:
-                        payload = b.dict()  # pydantic v1
-                    except Exception:
-                        payload = b if isinstance(b, dict) else {"brief": str(b)}
-
-                # Pretty print common fields if present
-                title = payload.get("title") or payload.get("headline") or f"Brief {i}"
-                st.markdown(f"**{title}**")
-                if payload.get("synopsis"):
-                    st.write(payload["synopsis"])
-                if payload.get("themes"):
-                    st.markdown("**Themes**")
-                    st.write(payload["themes"])
-                if payload.get("entities"):
-                    st.markdown("**Entities**")
-                    st.write(payload["entities"])
-                if payload.get("sources"):
-                    st.markdown("**Sources**")
-                    st.write(payload["sources"])
-
-                st.markdown("—")
-                st.json(payload)
+    st.success(f"Loaded {len(briefs)} TrendBriefs from the sheet.")
+    for b in briefs:
+        with st.expander(b.title or "Trend"):
+            # If your TrendBrief is a Pydantic model:
+            try:
+                st.json(b.model_dump())
+            except Exception:
+                # Fallback if it's a plain dict or dataclass
+                st.json(getattr(b, "__dict__", b))
