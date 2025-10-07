@@ -9,6 +9,7 @@ import streamlit as st
 # Trends adapter (exports all needed functions)
 from adapters.trends_serp_adapter import (
     get_serpapi_key,
+    serp_key_sources,
     fetch_trends_and_news,
     enrich_news_with_meta,
 )
@@ -28,7 +29,7 @@ except Exception:
 st.set_page_config(page_title="Guided Flow", page_icon="🧭", layout="wide")
 st.title("Guided Flow: Trends → Variants → Synthetic Focus → Finalise")
 
-st.markdown("Start by fetching live AU finance trends, then draft copy, then run a synthetic focus group to iterate.")
+st.markdown("Fetch live AU finance trends, draft copy, and iterate with a synthetic focus group until the intent target is hit.")
 
 # ---- Locate required assets ----
 assets_dir = Path("assets")
@@ -47,9 +48,9 @@ traits_path = next((p for p in traits_path_candidates if p.exists()), None)
 personas_path = next((p for p in personas_path_candidates if p.exists()), None)
 
 if not traits_path:
-    st.error("Missing traits config. I looked for assets/traits_config.json, ./traits_config.json, and data/traits_config.json.")
+    st.error("Missing traits config. Looked for assets/traits_config.json, ./traits_config.json, and data/traits_config.json.")
 if not personas_path:
-    st.error("Missing personas. I looked for assets/personas.json, ./personas.json, and data/personas.json.")
+    st.error("Missing personas. Looked for assets/personas.json, ./personas.json, and data/personas.json.")
 
 # Load trait config
 traits_cfg = {}
@@ -61,27 +62,36 @@ try:
 except Exception as e:
     st.warning(f"Traits config read issue: {e}")
 
-# SerpAPI key
+# SerpAPI key + safe diagnostics
 serp_key = get_serpapi_key()
+srcs = serp_key_sources()
 
 with st.expander("Live Trends & News", expanded=True):
-    st.caption("Uses SerpAPI: Google Trends (related queries rising) and Google News for AU within last 4 hours.")
+    st.caption("Uses SerpAPI: Google Trends (related queries rising) and Google News for AU within the selected window.")
     query = st.text_input("Search theme for news & trends", "asx 200")
-    colA, colB = st.columns([1, 1])
+    colA, colB, colC = st.columns([1, 1, 2])
     with colA:
         st.write("SerpAPI status:", "✅ key found" if serp_key else "❌ no key")
     with colB:
         news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
+    with colC:
+        with st.popover("🔧 Key detection details"):
+            st.markdown("**Environment**")
+            st.write({k: bool(v) for k, v in srcs["env"].items()})
+            st.markdown("**Secrets**")
+            st.write({k: bool(v) for k, v in srcs["secrets"].items()})
+            st.caption("Values are never shown. If `[serpapi].api_key` is True, the app can read your key.")
 
-    if st.button("🔎 Find live trends & news", disabled=serp_key is None):
+    # Let the user try even if detection fails, but show a clear error if it does
+    if st.button("🔎 Find live trends & news"):
         try:
             rising, news = fetch_trends_and_news(serp_key, query=query, news_when=news_when)
             news = enrich_news_with_meta(news)
-            # Build top 10 rising themes
             themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
             st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
         except Exception as e:
             st.error(f"Trend fetch failed: {e}")
+            st.stop()
 
 data = st.session_state.get("guidance_trends")
 if data:
@@ -141,7 +151,6 @@ if chosen and traits_path and personas_path:
     if not variants:
         st.error("Copywriter returned no variants.")
     else:
-        # Render variants and let user pick a base
         idx = st.radio(
             "Pick a base variant",
             [f"Variant {i+1}" for i in range(len(variants))],
@@ -155,7 +164,6 @@ if chosen and traits_path and personas_path:
         st.markdown(base_text)
 
         # ---- 3) Focus-test loop (auto revise until pass) ----
-        # Load personas
         if load_personas is not None:
             personas = load_personas(str(personas_path))
         else:
@@ -169,7 +177,6 @@ if chosen and traits_path and personas_path:
             current = base_text
             passed = False
             for r in range(int(rounds)):
-                # Wrap text like a file object for sprint_engine
                 class _Text(BytesIO):
                     name = "copy.txt"
                 f = _Text(current.encode("utf-8"))
@@ -191,7 +198,6 @@ if chosen and traits_path and personas_path:
                     passed = True
                     break
 
-                # Build improvement brief from lowest cluster feedback
                 if clusters:
                     worst = min(clusters, key=clusters.get)
                 else:
