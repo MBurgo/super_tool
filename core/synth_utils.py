@@ -1,8 +1,11 @@
 # core/synth_utils.py
-# Robust OpenAI helpers used across the app.
-# - Works with OpenAI Python SDK v1.x (preferred) and v0.28.x (fallback).
+# Single source of truth for OpenAI helpers + safe JSON parsing.
+# - Compatible with OpenAI Python SDK v1.x (preferred) and v0.28.x (fallback).
 # - Reads API key from env or Streamlit secrets ([openai].api_key or OPENAI_API_KEY).
-# - Exposes: call_gpt_json(messages, model=...), embed_texts(texts, model=...)
+# - Exposes:
+#     call_gpt_json(messages, model=...)
+#     embed_texts(texts, model=...)
+#     safe_json(raw_text, default={})
 
 from __future__ import annotations
 
@@ -10,8 +13,9 @@ from typing import List, Dict, Any, Optional
 import os
 import json
 import time
+import re
 
-# Streamlit is optional; used only for secrets if available.
+# Streamlit is optional; used only to read secrets if available.
 try:
     import streamlit as st  # type: ignore
 except Exception:
@@ -31,6 +35,8 @@ try:
 except Exception:
     openai_legacy = None  # type: ignore
 
+
+# --------------------------- secrets helpers ---------------------------
 
 def _nested_get(mapping: Any, keys: List[str]) -> Optional[Any]:
     cur = mapping
@@ -71,6 +77,8 @@ def _get_openai_api_key() -> str:
     )
 
 
+# --------------------------- OpenAI clients ---------------------------
+
 def _client_v1():
     if not _OPENAI_V1:
         return None
@@ -92,6 +100,8 @@ def _ensure_legacy_config():
         return False
 
 
+# --------------------------- Public API ---------------------------
+
 def call_gpt_json(
     messages: List[Dict[str, str]],
     *,
@@ -102,8 +112,8 @@ def call_gpt_json(
     response_format_json: bool = True,
 ) -> str:
     """
-    Call Chat Completions and return the assistant content as a JSON string.
-    We do not parse here; the caller will parse and handle errors.
+    Chat completions returning assistant content as a JSON string.
+    We do not parse here; caller decides how to handle bad JSON.
     """
     # V1 path
     if _OPENAI_V1:
@@ -140,7 +150,6 @@ def call_gpt_json(
                 }
                 if response_format_json:
                     kwargs["response_format"] = {"type": "json_object"}
-                # Older SDKs may not support response_format; fall back silently
                 try:
                     resp = openai_legacy.ChatCompletion.create(**kwargs)  # type: ignore
                 except Exception:
@@ -191,3 +200,63 @@ def embed_texts(
                 time.sleep(0.8 * (attempt + 1))
 
     raise RuntimeError("OpenAI SDK not installed or misconfigured for embeddings.")
+
+
+def safe_json(raw: Any, default: Any = None) -> Any:
+    """
+    Best-effort JSON loader that tolerates:
+      - leading/trailing junk or code fences
+      - stray prose around a JSON object/array
+      - trailing commas before } or ]
+    Returns `default` ({} by default) if parsing fails.
+    """
+    if default is None:
+        default = {}
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not isinstance(raw, str):
+        return default
+
+    s = raw.strip()
+
+    # Strip code fences ```json ... ```
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```$", "", s)
+
+    # Direct parse
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    # Try to isolate the outermost {...} or [...]
+    def _slice_to_json(text: str) -> Optional[str]:
+        a1, b1 = text.find("{"), text.rfind("}")
+        a2, b2 = text.find("["), text.rfind("]")
+        candidate_obj = text[a1:b1 + 1] if a1 != -1 and b1 > a1 else None
+        candidate_arr = text[a2:b2 + 1] if a2 != -1 and b2 > a2 else None
+        # Prefer object over array if both exist
+        return candidate_obj or candidate_arr
+
+    cand = _slice_to_json(s)
+    if cand:
+        try:
+            return json.loads(cand)
+        except Exception:
+            # Remove trailing commas: ,\s*([}\]])
+            s2 = re.sub(r",\s*([}\]])", r"\1", cand)
+            try:
+                return json.loads(s2)
+            except Exception:
+                pass
+
+    # Last-ditch: remove trailing commas in whole string and try again
+    s3 = re.sub(r",\s*([}\]])", r"\1", s)
+    try:
+        return json.loads(s3)
+    except Exception:
+        return default
+
+
+__all__ = ["call_gpt_json", "embed_texts", "safe_json"]
