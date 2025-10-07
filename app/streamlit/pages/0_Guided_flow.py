@@ -1,123 +1,123 @@
-# app/streamlit/pages/0_Guided_Flow.py
+# app/streamlit/pages/0_Guided_flow.py
 import _bootstrap
-import streamlit as st
+import json
 from io import BytesIO
-import numpy as np
-import json, pathlib, os
+from pathlib import Path
 
-# ── Adapters & engines (with safe fallbacks for import paths) ──────────
+import numpy as np
+import streamlit as st
+
+# ── External adapters (SERP-based trend finder, copywriter) ───────────
 from adapters.trends_serp_adapter import fetch_trends_and_news
 from adapters.copywriter_mf_adapter import generate as gen_copy
+
+# ── Sprint engine (try packaged path first, then flat fallback) ────────
 try:
     from core.sprint_engine import run_sprint
 except Exception:
-    # fallback if the file sits at project root
-    from sprint_engine import run_sprint
-from tmf_synth_utils import load_personas
+    from sprint_engine import run_sprint  # flat layout fallback
 
+# ───────────────────────────────────────────────────────────────────────
+# Helpers (local loaders, robust secrets discovery)
+# ───────────────────────────────────────────────────────────────────────
+def _find_serp_key() -> str | None:
+    # Try Streamlit secrets (nested and flat) then environment
+    try:
+        if "serpapi" in st.secrets and "api_key" in st.secrets["serpapi"]:
+            return st.secrets["serpapi"]["api_key"]
+    except Exception:
+        pass
+    try:
+        if "SERPAPI_API_KEY" in st.secrets:
+            return st.secrets["SERPAPI_API_KEY"]
+        if "SERP_API_KEY" in st.secrets:
+            return st.secrets["SERP_API_KEY"]
+    except Exception:
+        pass
+
+    import os
+    return os.environ.get("SERPAPI_API_KEY") or os.environ.get("SERP_API_KEY")
+
+
+def _load_personas_from_repo() -> list[dict]:
+    """
+    Looks for personas.json in the repo so the page doesn't require uploads.
+    Priority:
+      1) assets/personas.json
+      2) data/personas.json
+      3) personas.json (repo root)
+    """
+    candidates = [
+        Path("assets/personas.json"),
+        Path("data/personas.json"),
+        Path("personas.json"),
+    ]
+    for p in candidates:
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data.get("personas") or data  # support both shapes
+    raise FileNotFoundError(
+        "No personas.json found. Commit one of: "
+        "assets/personas.json, data/personas.json, or repo-root personas.json."
+    )
+
+
+def _load_traits_cfg() -> dict:
+    """
+    Reads traits_config.json with failover so we’re resilient to where you keep it.
+    Priority:
+      1) assets/traits_config.json
+      2) traits_config.json (repo root)
+    """
+    for p in [Path("assets/traits_config.json"), Path("traits_config.json")]:
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    raise FileNotFoundError(
+        "Missing traits config. Commit assets/traits_config.json "
+        "or traits_config.json at the repo root."
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Page UI
+# ───────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Guided Flow", page_icon="🧭")
 st.title("🧭 Guided Campaign Builder (No Sheets)")
 
-# ── Default trait rules (used if assets/traits_config.json is missing) ──
-TRAITS_DEFAULT = {
-    "Urgency": {
-        "high_threshold": 8, "low_threshold": 3,
-        "high_rule": "- Include a clear deadline phrase in both the headline/subject **and** the CTA (e.g., “midnight”, an explicit date, “today only”).",
-        "mid_rule": "- Refer to timing **once only** (e.g., “later this week”) and use **no more than one** urgency synonym such as “quickly”, “act now”, “limited”, etc. Do not include hard countdowns or explicit deadlines.",
-        "low_rule": "- DO NOT use countdowns, deadline words, scarcity cues or time‑pressure phrases; keep tone calm and informational.",
-        "high_exemplar_allowed": True
-    },
-    "Data_Richness": {
-        "high_threshold": 7, "low_threshold": 3,
-        "high_rule": "- Cite at least **one** specific numeric performance figure (percentage return, CAGR, dollar amount, member count, etc.).",
-        "mid_rule": "- You may use **one** light data point or ranking (e.g., “top‑quartile performer”), but no detailed stats tables or multiple figures.",
-        "low_rule": "- Avoid statistics, percentages and dollar figures; rely purely on qualitative proof.",
-        "high_exemplar_allowed": False
-    },
-    "Social_Proof": {
-        "high_threshold": 6, "low_threshold": 3,
-        "high_rule": "- Provide **three or more** credibility builders (testimonials, membership count, expert quote, third‑party award).",
-        "mid_rule": "- Include **one** credibility builder (e.g., “trusted by 80,000 members”) but no lengthy testimonial blocks.",
-        "low_rule": "- Omit testimonials, expert quotes, awards and membership numbers.",
-        "high_exemplar_allowed": False
-    },
-    "Conversational_Tone": {
-        "high_threshold": 8, "low_threshold": 3,
-        "high_rule": "- Write in second‑person, use contractions, occasional rhetorical questions and short, friendly sentences.",
-        "mid_rule": "- Use clear, neutral language (mix of second‑ and third‑person is fine). **Do not open with informal greetings (e.g., “Hi”, “Hey”, “Hi there”) or rhetorical questions.** Avoid more than one contraction per paragraph.",
-        "low_rule": "- Write in third‑person, avoid contractions and questions; maintain a neutral, formal register.",
-        "high_exemplar_allowed": False
-    },
-    "Imagery": {
-        "high_threshold": 8, "low_threshold": 3,
-        "high_rule": "- Use vivid metaphors or visual comparisons (e.g., snowball, rocket, tidal wave) to illustrate key points.",
-        "mid_rule": "- Allow **one** mild metaphor or descriptive adjective; otherwise keep language straightforward.",
-        "low_rule": "- Avoid metaphors and descriptive imagery; keep language literal. Use **no more than two adjectives** per paragraph.",
-        "high_exemplar_allowed": False
-    },
-    "Comparative_Framing": {
-        "high_threshold": 7, "low_threshold": 3,
-        "high_rule": "- Draw explicit historical or sector comparisons (e.g., “like buying Netflix in 2002” or “this decade’s oil rush”).",
-        "mid_rule": "- Use a single light comparison (e.g., “similar to past tech booms”) without deep storytelling.",
-        "low_rule": "- Do not reference historical comparisons or analogies; focus only on the present opportunity.",
-        "high_exemplar_allowed": False
-    },
-    "FOMO": {
-        "high_threshold": 7, "low_threshold": 3,
-        "high_rule": "- Highlight the emotional cost of missing out and potential regret (e.g., “don’t be left behind”).",
-        "mid_rule": "- Note that the offer is attractive and may not last, **but do not mention regret, fear, or missing out.** Words such as “popular” or “worth considering soon” are acceptable.",
-        "low_rule": "- Avoid any fear‑of‑missing‑out language or emotional urgency; present benefits objectively.",
-        "high_exemplar_allowed": False
-    },
-    "Repetition": {
-        "high_threshold": 6, "low_threshold": 2,
-        "high_rule": "- Reinforce the main offer or deadline with **deliberate repetition** for emphasis (no more than two repeats).",
-        "mid_rule": "- Restate the offer once in a different phrase; avoid obvious repetition techniques.",
-        "low_rule": "- State each point only once; avoid repeated phrases entirely.",
-        "high_exemplar_allowed": False
-    }
-}
-
-def _load_traits_cfg() -> dict:
-    cfg_path = pathlib.Path("assets/traits_config.json")
-    if cfg_path.exists():
-        try:
-            return json.loads(cfg_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            st.warning(f"Could not parse assets/traits_config.json, using built-in defaults. ({e})")
+# 1) Kick off trend finder
+if st.button("🔎 Find live trends & news", type="primary"):
+    serp_key = _find_serp_key()
+    if not serp_key:
+        st.error(
+            "SerpAPI key not found. Add to Streamlit secrets as "
+            '`[serpapi]\napi_key="..."` or set the SERPAPI_API_KEY env var.'
+        )
     else:
-        st.info("No assets/traits_config.json found. Using built-in trait rules.")
-    return TRAITS_DEFAULT
-
-def _need(var: str, where: str = "secrets") -> str:
-    if var == "SERP_API_KEY":
-        # We keep the original structure: st.secrets['serpapi']['api_key']
-        try:
-            return st.secrets["serpapi"]["api_key"]
-        except Exception:
-            st.error("Missing SerpAPI key. Add to secrets as:\n\n[serpapi]\napi_key = \"YOUR_KEY\"")
-            st.stop()
-    return ""
-
-# ── 1) Kick off trend finder ───────────────────────────────────────────
-if st.button("🔎 Find live trends & news"):
-    serp_key = _need("SERP_API_KEY", "secrets")
-    rising, news = fetch_trends_and_news(serp_key)
-
-    themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in rising[:10]]
-    st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
+        rising, news = fetch_trends_and_news(serp_key)
+        # Keep a compact list of themes (top 10 rising queries)
+        themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
+        st.session_state["guidance_trends"] = {"rising": rising or [], "news": news or [], "themes": themes}
 
 data = st.session_state.get("guidance_trends")
 if data:
     st.subheader("Pick a theme to pursue")
-    choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0, key="guided_theme_pick")
-    if st.button("✍️ Draft campaign for this theme"):
-        st.session_state["chosen_theme"] = choice
+    if not data["themes"]:
+        st.warning("No rising queries returned. Try again in a moment.")
+    else:
+        choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0)
+        if st.button("✍️ Draft campaign for this theme"):
+            st.session_state["chosen_theme"] = choice
 
-# ── 2) Generate initial variants ───────────────────────────────────────
+# 2) Generate initial variants for chosen theme
 chosen = st.session_state.get("chosen_theme")
 if chosen:
     st.subheader("Drafting campaign variants…")
+
+    try:
+        trait_cfg = _load_traits_cfg()
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
 
     brief = {
         "id": "guided",
@@ -125,35 +125,41 @@ if chosen:
         "details": "Campaign based on live AU rising queries + latest news.",
         "offer_price": "", "retail_price": "", "offer_term": "",
         "reports": "", "stocks_to_tease": "", "quotes_news": "",
-        "length_choice": "📐 Medium (200–500 words)"
+        "length_choice": "📐 Medium (200–500 words)",
     }
+    traits = {"Urgency": 7, "Data_Richness": 6, "Social_Proof": 6,
+              "Comparative_Framing": 5, "Imagery": 6,
+              "Conversational_Tone": 7, "FOMO": 6, "Repetition": 4}
 
-    traits = {
-        "Urgency": 7, "Data_Richness": 6, "Social_Proof": 6,
-        "Comparative_Framing": 5, "Imagery": 6,
-        "Conversational_Tone": 7, "FOMO": 6, "Repetition": 4
-    }
-    trait_cfg = _load_traits_cfg()
-
+    # Generate 3 variants via the copywriter adapter
     variants = gen_copy(
         brief, fmt="sales_page", n=3,
         trait_cfg=trait_cfg, traits=traits,
-        country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
+        country="Australia",
+        model=st.secrets.get("openai_model", "gpt-4.1")
     )
 
-    texts = [v.copy for v in variants]
-    pick = st.radio("Choose a base variant", [f"Variant {i+1}" for i in range(len(texts))], index=0)
+    texts = [v.copy for v in variants] if variants else []
+    if not texts:
+        st.error("The copywriter returned no variants. Check your OpenAI key and model.")
+        st.stop()
+
+    pick = st.radio(
+        "Choose a base variant",
+        [f"Variant {i+1}" for i in range(len(texts))],
+        index=0
+    )
     idx = int(pick.split()[-1]) - 1
     base_text = texts[idx]
     st.markdown(base_text)
 
-    # ── 3) Focus-test loop (auto-revise until pass) ────────────────────
-    personas_path = pathlib.Path("assets/personas.json")
-    if not personas_path.exists():
-        st.error("Missing assets/personas.json. Commit your persona pack to assets/personas.json.")
+    # 3) Focus-test loop (auto-revise until pass)
+    try:
+        personas = _load_personas_from_repo()
+    except Exception as e:
+        st.error(str(e))
         st.stop()
 
-    personas = load_personas(str(personas_path))
     threshold = st.slider("Passing mean intent threshold", 6.0, 9.0, 7.5, 0.1)
     rounds = st.number_input("Max revision rounds", 1, 5, 3)
 
@@ -162,18 +168,18 @@ if chosen:
         passed = False
 
         for r in range(int(rounds)):
-            # Prepare a fake "file" the sprint engine can read
+            # Wrap current copy as a file-like object for sprint_engine
             f = BytesIO(current.encode("utf-8"))
-            f.name = "copy.txt"   # sprint_engine.extract_text uses this to guess mime
+            f.name = "copy.txt"  # sprint_engine.extract_text expects a .name
 
             summary, df, fig, clusters = run_sprint(
                 file_obj=f,
                 segment="All Segments",
                 persona_groups=personas,
-                return_cluster_df=True
+                return_cluster_df=True,
             )
-            mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
 
+            mean_intent = float(np.mean(df["intent"])) if (df is not None and not df.empty) else 0.0
             st.plotly_chart(fig, use_container_width=True)
             st.write(summary)
             st.write(f"**Round {r+1} mean intent:** {mean_intent:.2f}/10")
@@ -182,17 +188,28 @@ if chosen:
                 passed = True
                 break
 
-            # Build a short feedback brief from cluster summaries to improve copy
-            tips = "\n".join([f"- Cluster {int(c['cluster'])}: {c['summary']}" for _, c in clusters.iterrows()])
+            # Build short feedback brief from cluster summaries to improve copy
+            if clusters is not None and not clusters.empty:
+                tips = "\n".join(
+                    [f"- Cluster {int(row['cluster'])}: {row['summary']}" for _, row in clusters.iterrows()]
+                )
+            else:
+                tips = "- (No cluster summaries available; improve clarity and benefits emphasis.)"
+
             improve_brief = dict(brief)
             improve_brief["quotes_news"] = f"Persona feedback themes to address:\n{tips}"
 
             improved = gen_copy(
                 improve_brief, fmt="sales_page", n=1,
                 trait_cfg=trait_cfg, traits=traits,
-                country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
+                country="Australia",
+                model=st.secrets.get("openai_model", "gpt-4.1")
             )
-            current = improved[0].copy
+            if improved:
+                current = improved[0].copy
+            else:
+                st.warning("Improver returned no text—continuing with last best draft.")
+                break
 
         st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
         st.markdown(current)
