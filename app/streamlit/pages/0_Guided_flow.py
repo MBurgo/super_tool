@@ -12,50 +12,54 @@ st.set_page_config(page_title="Guided Flow", page_icon="🧭", layout="wide")
 st.title("Guided Flow: Trends → Variants → Synthetic Focus → Finalise")
 st.caption("Live AU finance trends, draft copy, iterate with synthetic personas until the intent target is met.")
 
-# ---- Show runtime quickly so we stop guessing versions ----
+# ---- Runtime / import helpers ----
 with st.expander("Runtime info", expanded=False):
-    st.write({"python_version": sys.version, "sys_path_head": sys.path[:3]})
+    st.write({"python_version": sys.version})
 
-# ---- Lazy import adapters with guardrails so we can SEE errors ----
-def load_adapter(module_name: str):
+def _lazy_import(name: str):
     try:
-        mod = importlib.import_module(module_name)
+        mod = importlib.import_module(name)
         return mod, None
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
-serp_adapter, serp_err = load_adapter("adapters.trends_serp_adapter")
+serp_adapter, serp_err = _lazy_import("adapters.trends_serp_adapter")
 if serp_err:
     st.error("Failed to import adapters.trends_serp_adapter")
     st.code(serp_err)
     st.stop()
 
-copy_adapter, copy_err = load_adapter("adapters.copywriter_mf_adapter")
+copy_adapter, copy_err = _lazy_import("adapters.copywriter_mf_adapter")
 if copy_err:
     st.error("Failed to import adapters.copywriter_mf_adapter")
     st.code(copy_err)
     st.stop()
 
-sprint_engine, sprint_err = load_adapter("core.sprint_engine")
+sprint_engine, sprint_err = _lazy_import("core.sprint_engine")
 if sprint_err:
     st.error("Failed to import core.sprint_engine")
     st.code(sprint_err)
     st.stop()
 
-# Bind functions safely
-get_serpapi_key = getattr(serp_adapter, "get_serpapi_key", None)
-serp_key_diagnostics = getattr(serp_adapter, "serp_key_diagnostics", None)
-fetch_trends_and_news = getattr(serp_adapter, "fetch_trends_and_news", None)
-enrich_news_with_meta = getattr(serp_adapter, "enrich_news_with_meta", None)
-gen_copy = getattr(copy_adapter, "generate", None)
-run_sprint = getattr(sprint_engine, "run_sprint", None)
+theme_engine, theme_err = _lazy_import("core.news_theme_engine")
+if theme_err:
+    st.error("Failed to import core.news_theme_engine")
+    st.code(theme_err)
+    st.stop()
+
+get_serpapi_key = getattr(serp_adapter, "get_serpapi_key")
+serp_key_diagnostics = getattr(serp_adapter, "serp_key_diagnostics")
+fetch_trends_and_news = getattr(serp_adapter, "fetch_trends_and_news")
+enrich_news_with_meta = getattr(serp_adapter, "enrich_news_with_meta")
+gen_copy = getattr(copy_adapter, "generate")
+run_sprint = getattr(sprint_engine, "run_sprint")
+analyze_news_to_themes = getattr(theme_engine, "analyze_news_to_themes")
 
 with st.expander("Import diagnostics", expanded=False):
     st.write({
         "adapter_module_path": getattr(serp_adapter, "__file__", "n/a"),
         "adapter_version": getattr(serp_adapter, "ADAPTER_VERSION", "n/a"),
-        "copywriter_module_path": getattr(copy_adapter, "__file__", "n/a"),
-        "sprint_module_path": getattr(sprint_engine, "__file__", "n/a"),
+        "theme_engine_path": getattr(theme_engine, "__file__", "n/a"),
     })
 
 # ---- Locate required assets ----
@@ -89,21 +93,10 @@ try:
 except Exception as e:
     st.warning(f"Traits config read issue: {e}")
 
-# Helper to recompute key each render
-def _current_serp_key():
-    try:
-        k = get_serpapi_key() if callable(get_serpapi_key) else None
-    except Exception as e:
-        st.warning(f"get_serpapi_key raised: {type(e).__name__}: {e}")
-        k = None
-    st.session_state["serpapi_key_present"] = bool(k and str(k).strip())
-    return k
-
+# ---- Trends & News panel ----
 with st.expander("Live Trends & News", expanded=True):
-    st.caption("Uses SerpAPI: Google Trends (rising related queries) and Google News for AU within your chosen window.")
-
-    serp_key = _current_serp_key()
-
+    st.caption("Uses SerpAPI for Google News and Trends, then clusters headlines to produce analyst-grade themes for AU finance.")
+    serp_key = get_serpapi_key()
     colA, colB = st.columns([1, 1])
     with colA:
         st.write("SerpAPI status:", "✅ key found" if serp_key else "❌ no key")
@@ -114,55 +107,80 @@ with st.expander("Live Trends & News", expanded=True):
             except Exception:
                 st.experimental_rerun()
 
-    # Non-leaky diagnostics: value lengths only
     diag = {}
     try:
-        diag = serp_key_diagnostics() if callable(serp_key_diagnostics) else {}
-    except Exception as e:
-        diag = {"error": f"{type(e).__name__}: {e}"}
+        diag = serp_key_diagnostics()
+    except Exception:
+        diag = {}
     st.markdown("**Key detection diagnostic (never shows values):**")
     st.code(json.dumps(diag, indent=2), language="json")
 
+    # Inputs
     query = st.text_input("Search theme for news & trends", "asx 200")
-    news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
+    news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=2)
 
+    # Fetch
     if st.button("🔎 Find live trends & news"):
         try:
             rising, news = fetch_trends_and_news(serp_key, query=query, news_when=news_when)
             news = enrich_news_with_meta(news)
-            themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
-            st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
+            st.session_state["raw_news"] = news
+            st.session_state["raw_rising"] = rising
+
+            # NEW: analyze into proper themes
+            # Use LLM if OpenAI key is configured through your existing call_gpt_json wrapper
+            themes = analyze_news_to_themes(news, rising, country="Australia", top_k=None, use_llm=True, model="gpt-4o-mini")
+            st.session_state["themes"] = themes
+
         except Exception as e:
             st.error(f"Trend fetch failed: {type(e).__name__}: {e}")
             st.stop()
 
-data = st.session_state.get("guidance_trends")
-if data:
+# ---- Theme selection ----
+themes = st.session_state.get("themes", [])
+news = st.session_state.get("raw_news", [])
+if themes:
     st.subheader("Pick a theme to pursue")
-    if data["themes"]:
-        choice = st.radio("Top Rising Queries (AU)", data["themes"], index=0)
-        chosen_theme = choice.split(" — ")[0]
-    else:
-        st.info("No rising queries from SerpAPI. You can still proceed by typing a theme manually.")
-        chosen_theme = st.text_input("Enter a theme", "ASX 200 rally")
+
+    labels = [f"{t['query']}  ·  {int(t['score'])} articles" for t in themes]
+    idx = st.radio("Top Themes (AU)", labels, index=0)
+    choice = themes[labels.index(idx)]
+    st.session_state["chosen_theme"] = choice
+
+    # Show why + supporting headlines
+    st.markdown(f"**Why this matters:** {choice.get('reason','')}")
+    with st.expander("Representative headlines", expanded=False):
+        for a in choice.get("articles", []):
+            title = a.get("title","")
+            src = a.get("source","")
+            date = a.get("date","")
+            st.write(f"- {title}  ·  _{src}_  ·  {date}")
+
+    st.caption("Keywords for targeting:")
+    st.write(", ".join(choice.get("keywords", [])[:8]))
 
     if st.button("✍️ Draft initial campaign for this theme"):
-        st.session_state["chosen_theme"] = chosen_theme
+        st.session_state["chosen_theme_label"] = choice.get("query")
 
-chosen = st.session_state.get("chosen_theme")
-if chosen and traits_path and personas_path:
+# ---- Copy generation & focus test ----
+chosen_label = st.session_state.get("chosen_theme_label")
+if chosen_label and traits_path and personas_path:
     st.subheader("Drafting campaign variants…")
+
+    # Derive some “quotes/news” bullets from the selected cluster to ground copy
+    sel = st.session_state.get("chosen_theme", {})
+    bullets = "\n".join([f"- {a.get('title','')}" for a in sel.get("articles", [])[:4]])
 
     brief = {
         "id": "guided",
-        "theme": chosen,
-        "hook": f"Investing insights tied to {chosen}",
+        "theme": chosen_label,
+        "hook": f"Investing insights tied to {chosen_label}",
         "details": "Retail investor friendly, educational tone, actionable guidance.",
         "offer_price": "$99",
         "offer_term": "12 months",
         "reports": "New member report bundle",
         "stocks_to_tease": "2–3 ASX names",
-        "quotes_news": "",
+        "quotes_news": bullets,
         "structure": "Hook, Problem, Insight, Proof, Offer, CTA",
         "requirements": "Avoid promises. Emphasise risk and education. Include price and term.",
     }
@@ -206,7 +224,9 @@ if chosen and traits_path and personas_path:
         base_text = base.copy
         st.markdown(base_text)
 
-        personas = json.loads(personas_path.read_text(encoding="utf-8")).get("personas", [])
+        # Personas
+        pdata = json.loads(personas_path.read_text(encoding="utf-8"))
+        personas = pdata.get("personas", [])
 
         threshold = st.slider("Passing mean intent threshold", 6.0, 9.5, 7.5, 0.1)
         rounds = st.number_input("Max revision rounds", 1, 5, 3)
@@ -236,17 +256,18 @@ if chosen and traits_path and personas_path:
                     passed = True
                     break
 
+                # Target worst cluster and improve
                 if clusters:
                     worst = min(clusters, key=clusters.get)
                 else:
                     worst = 0
                 worst_rows = df[df["cluster"] == worst].sort_values("intent").head(5)
-                bullets = "\n".join([f"- {t}" for t in worst_rows["feedback"].tolist()])
+                fb_bullets = "\n".join([f"- {t}" for t in worst_rows["feedback"].tolist()])
 
                 improve_brief = {
                     **brief,
                     "structure": "Keep same structure but address the critique points explicitly.",
-                    "quotes_news": f"Persona critique to address:\n{bullets}",
+                    "quotes_news": f"Persona critique to address:\n{fb_bullets}",
                 }
 
                 improved = gen_copy(
@@ -259,5 +280,5 @@ if chosen and traits_path and personas_path:
             st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
             st.markdown(current)
 else:
-    if not st.session_state.get("guidance_trends"):
+    if not st.session_state.get("themes"):
         st.info("Click **Find live trends & news** to begin.")
