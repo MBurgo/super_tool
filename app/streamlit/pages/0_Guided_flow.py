@@ -3,7 +3,7 @@ import _bootstrap
 import streamlit as st
 from io import BytesIO
 import numpy as np
-import json, pathlib, os
+import json, pathlib
 
 # ── Adapters & engines (with safe fallbacks for import paths) ──────────
 from adapters.trends_serp_adapter import fetch_trends_and_news
@@ -17,6 +17,14 @@ from tmf_synth_utils import load_personas
 
 st.set_page_config(page_title="Guided Flow", page_icon="🧭")
 st.title("🧭 Guided Campaign Builder (No Sheets)")
+
+state = st.session_state
+state.setdefault("guided_stage", "start")
+state.setdefault("guidance_trends", None)
+state.setdefault("chosen_theme", None)
+state.setdefault("guided_variants", None)
+state.setdefault("guided_focus_result", None)
+state.setdefault("guided_focus_source", None)
 
 # ── Default trait rules (used if assets/traits_config.json is missing) ──
 TRAITS_DEFAULT = {
@@ -99,25 +107,55 @@ def _need(var: str, where: str = "secrets") -> str:
             st.stop()
     return ""
 
+
 # ── 1) Kick off trend finder ───────────────────────────────────────────
-if st.button("🔎 Find live trends & news"):
+st.header("1. Discover live trends", divider="blue")
+if st.button("🔎 Start trend finder"):
     serp_key = _need("SERP_API_KEY", "secrets")
-    rising, news = fetch_trends_and_news(serp_key)
+    with st.spinner("Contacting SERP and news sources…"):
+        rising, news = fetch_trends_and_news(serp_key)
 
     themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in rising[:10]]
-    st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
+    state["guidance_trends"] = {
+        "rising": rising,
+        "news": news,
+        "themes": themes,
+    }
+    state["guided_stage"] = "choose_theme"
+    state["guided_variants"] = None
+    state["guided_focus_result"] = None
 
-data = st.session_state.get("guidance_trends")
+data = state.get("guidance_trends")
 if data:
-    st.subheader("Pick a theme to pursue")
-    choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0, key="guided_theme_pick")
-    if st.button("✍️ Draft campaign for this theme"):
-        st.session_state["chosen_theme"] = choice
+    st.success("Latest trend insights loaded. Pick a theme to continue.")
+    with st.expander("See fetched data", expanded=False):
+        st.write("### Rising queries")
+        st.json(data["rising"])
+        st.write("### Related news")
+        st.json(data["news"])
+
+    st.header("2. Select a campaign theme", divider="blue")
+    choice = st.radio(
+        "Top Rising Queries (last 4h AU)",
+        data["themes"],
+        index=0,
+        key="guided_theme_pick",
+        disabled=state["guided_stage"] == "start",
+    )
+    if st.button(
+        "✍️ Continue with this theme",
+        disabled=state["guided_stage"] == "start",
+    ):
+        state["chosen_theme"] = choice
+        state["guided_stage"] = "draft_variants"
+        state["guided_variants"] = None
+        state["guided_focus_result"] = None
 
 # ── 2) Generate initial variants ───────────────────────────────────────
-chosen = st.session_state.get("chosen_theme")
+chosen = state.get("chosen_theme")
 if chosen:
-    st.subheader("Drafting campaign variants…")
+    st.header("3. Draft campaign variants", divider="blue")
+    st.caption(f"Theme selected: **{chosen}**")
 
     brief = {
         "id": "guided",
@@ -135,17 +173,34 @@ if chosen:
     }
     trait_cfg = _load_traits_cfg()
 
-    variants = gen_copy(
-        brief, fmt="sales_page", n=3,
-        trait_cfg=trait_cfg, traits=traits,
-        country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
-    )
+    if state.get("guided_variants") is None and state["guided_stage"] == "draft_variants":
+        with st.spinner("Generating copy variants…"):
+            variants = gen_copy(
+                brief, fmt="sales_page", n=3,
+                trait_cfg=trait_cfg, traits=traits,
+                country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
+            )
+        state["guided_variants"] = [v.copy for v in variants]
 
-    texts = [v.copy for v in variants]
-    pick = st.radio("Choose a base variant", [f"Variant {i+1}" for i in range(len(texts))], index=0)
-    idx = int(pick.split()[-1]) - 1
-    base_text = texts[idx]
-    st.markdown(base_text)
+    texts = state.get("guided_variants") or []
+    if texts:
+        pick = st.radio(
+            "Choose a base variant",
+            [f"Variant {i+1}" for i in range(len(texts))],
+            index=0,
+            key="guided_variant_pick",
+        )
+        idx = int(pick.split()[-1]) - 1
+        base_text = texts[idx]
+        st.markdown(base_text)
+
+        if state["guided_stage"] == "draft_variants":
+            if st.button("🚀 Start focus testing & improvements"):
+                state["guided_stage"] = "focus_test"
+                state["guided_focus_result"] = None
+                state["guided_focus_source"] = base_text
+        else:
+            base_text = state.get("guided_focus_source", base_text)
 
     # ── 3) Focus-test loop (auto-revise until pass) ────────────────────
     personas_path = pathlib.Path("assets/personas.json")
@@ -157,42 +212,81 @@ if chosen:
     threshold = st.slider("Passing mean intent threshold", 6.0, 9.0, 7.5, 0.1)
     rounds = st.number_input("Max revision rounds", 1, 5, 3)
 
-    if st.button("🧪 Run focus test + auto‑improve"):
-        current = base_text
-        passed = False
+    if st.session_state.get("guided_stage") in {"focus_test", "complete"}:
+        st.header("4. Focus test & refine", divider="blue")
+        st.caption("We iterate until the copy meets the target intent score or max rounds is reached.")
 
-        for r in range(int(rounds)):
-            # Prepare a fake "file" the sprint engine can read
-            f = BytesIO(current.encode("utf-8"))
-            f.name = "copy.txt"   # sprint_engine.extract_text uses this to guess mime
+        start_copy = state.get("guided_focus_source", base_text)
 
-            summary, df, fig, clusters = run_sprint(
-                file_obj=f,
-                segment="All Segments",
-                persona_groups=personas,
-                return_cluster_df=True
-            )
-            mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
+        if state.get("guided_focus_result") is None and state["guided_stage"] == "focus_test":
+            results = []
+            current = start_copy
+            passed = False
 
-            st.plotly_chart(fig, use_container_width=True)
-            st.write(summary)
-            st.write(f"**Round {r+1} mean intent:** {mean_intent:.2f}/10")
+            with st.spinner("Running persona focus group…"):
+                for r in range(int(rounds)):
+                    # Prepare a fake "file" the sprint engine can read
+                    f = BytesIO(current.encode("utf-8"))
+                    f.name = "copy.txt"   # sprint_engine.extract_text uses this to guess mime
 
-            if mean_intent >= threshold:
-                passed = True
-                break
+                    summary, df, fig, clusters = run_sprint(
+                        file_obj=f,
+                        segment="All Segments",
+                        persona_groups=personas,
+                        return_cluster_df=True
+                    )
+                    mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
 
-            # Build a short feedback brief from cluster summaries to improve copy
-            tips = "\n".join([f"- Cluster {int(c['cluster'])}: {c['summary']}" for _, c in clusters.iterrows()])
-            improve_brief = dict(brief)
-            improve_brief["quotes_news"] = f"Persona feedback themes to address:\n{tips}"
+                    results.append({
+                        "round": r + 1,
+                        "copy": current,
+                        "summary": summary,
+                        "mean_intent": mean_intent,
+                        "figure": fig,
+                        "clusters": clusters,
+                    })
 
-            improved = gen_copy(
-                improve_brief, fmt="sales_page", n=1,
-                trait_cfg=trait_cfg, traits=traits,
-                country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
-            )
-            current = improved[0].copy
+                    if mean_intent >= threshold:
+                        passed = True
+                        break
 
-        st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
-        st.markdown(current)
+                    tips = "\n".join(
+                        [f"- Cluster {int(c['cluster'])}: {c['summary']}" for _, c in clusters.iterrows()]
+                    )
+                    improve_brief = dict(brief)
+                    improve_brief["quotes_news"] = f"Persona feedback themes to address:\n{tips}"
+
+                    improved = gen_copy(
+                        improve_brief, fmt="sales_page", n=1,
+                        trait_cfg=trait_cfg, traits=traits,
+                        country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
+                    )
+                    current = improved[0].copy
+
+            state["guided_focus_result"] = {
+                "iterations": results,
+                "final_copy": current,
+                "passed": passed,
+            }
+            state["guided_stage"] = "complete"
+
+        focus_result = state.get("guided_focus_result")
+        if focus_result:
+            for entry in focus_result["iterations"]:
+                st.write(f"### Round {entry['round']}")
+                if entry["figure"] is not None:
+                    st.plotly_chart(entry["figure"], use_container_width=True)
+                st.write(entry["summary"])
+                st.write(f"**Mean intent:** {entry['mean_intent']:.2f}/10")
+
+            passed = focus_result["passed"]
+            st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
+            st.markdown(focus_result["final_copy"])
+
+            if st.button("🔄 Start over"):
+                state["guided_stage"] = "start"
+                state["guidance_trends"] = None
+                state["chosen_theme"] = None
+                state["guided_variants"] = None
+                state["guided_focus_result"] = None
+                state["guided_focus_source"] = None

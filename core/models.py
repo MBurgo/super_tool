@@ -1,30 +1,31 @@
-from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
+
+from pydantic import BaseModel, Field
 
 class Persona(BaseModel):
     id: str
     name: str
     weight: float = 0.1
     segment: Optional[str] = None
-    demographics: Dict[str, Any] = {}
-    goals: List[str] = []
-    fears: List[str] = []
-    channels: List[str] = []
-    language_style: List[str] = []
+    demographics: Dict[str, Any] = Field(default_factory=dict)
+    goals: List[str] = Field(default_factory=list)
+    fears: List[str] = Field(default_factory=list)
+    channels: List[str] = Field(default_factory=list)
+    language_style: List[str] = Field(default_factory=list)
     compliance_risk: str = "low"
     version: str = "1.0"
-    rubric: Dict[str, float] = {}
-    sensitivities: Dict[str, List[str]] = {}
-    overlays: List[str] = []
+    rubric: Dict[str, float] = Field(default_factory=dict)
+    sensitivities: Dict[str, List[str]] = Field(default_factory=dict)
+    overlays: List[str] = Field(default_factory=list)
 
 class TrendBrief(BaseModel):
     id: str
     headline: str
     summary: str
-    signals: List[str] = []
-    audiences: List[str] = []
+    signals: List[str] = Field(default_factory=list)
+    audiences: List[str] = Field(default_factory=list)
     freshness: str = "same_day"
-    evidence_links: List[str] = []
+    evidence_links: List[str] = Field(default_factory=list)
     priority_score: float = 0.5
 
 class CreativeVariant(BaseModel):
@@ -33,14 +34,14 @@ class CreativeVariant(BaseModel):
     format: str
     copy: str
     rationale: Optional[str] = None
-    meta: Dict[str, str] = {}
+    meta: Dict[str, str] = Field(default_factory=dict)
     version: int = 1
 
 class EvaluationResult(BaseModel):
     variant_id: str
-    persona_scores: Dict[str, float] = {}
-    qual_feedback: List[str] = []
-    auto_checks: Dict[str, bool] = {}
+    persona_scores: Dict[str, float] = Field(default_factory=dict)
+    qual_feedback: List[str] = Field(default_factory=list)
+    auto_checks: Dict[str, bool] = Field(default_factory=dict)
     predicted_ctr: float = 0.01
     composite_score: float = 0.0
 
