@@ -6,6 +6,7 @@
 #     call_gpt_json(messages, model=...)
 #     embed_texts(texts, model=...)
 #     safe_json(raw_text, default={})
+#     openai_key_diagnostics()
 
 from __future__ import annotations
 
@@ -77,16 +78,48 @@ def _get_openai_api_key() -> str:
     )
 
 
+def openai_key_diagnostics() -> Dict[str, Any]:
+    env = {
+        "OPENAI_API_KEY": len(os.environ.get("OPENAI_API_KEY", "")) or 0,
+        "OpenAI_APIKey": len(os.environ.get("OpenAI_APIKey", "")) or 0,
+        "openai_api_key": len(os.environ.get("openai_api_key", "")) or 0,
+    }
+    secrets = {"[openai].api_key": 0, "OPENAI_API_KEY": 0, "openai_api_key": 0}
+    tops = []
+    if st is not None:
+        try:
+            tops = list(getattr(st, "secrets", {}).keys())  # type: ignore
+        except Exception:
+            tops = []
+        v = _nested_get(st.secrets, ["openai", "api_key"])  # type: ignore[arg-type]
+        secrets["[openai].api_key"] = len(v) if isinstance(v, str) else 0
+        for name in ("OPENAI_API_KEY", "openai_api_key"):
+            t = _nested_get(st.secrets, [name])  # type: ignore[arg-type]
+            secrets[name] = len(t) if isinstance(t, str) else 0
+    return {
+        "module_path": __file__,
+        "env_value_lengths": env,
+        "secrets_value_lengths": secrets,
+        "secrets_top_level_keys": tops,
+    }
+
+
 # --------------------------- OpenAI clients ---------------------------
+
+def _ensure_env_has_key(key: str) -> None:
+    # Make sure the runtime also has the env var set for any downstream lib that reads it.
+    if key and os.environ.get("OPENAI_API_KEY", "") != key:
+        os.environ["OPENAI_API_KEY"] = key
 
 def _client_v1():
     if not _OPENAI_V1:
         return None
     key = _get_openai_api_key()
+    _ensure_env_has_key(key)
+    # Prefer explicit key first. Some very early v1 builds didn't accept api_key kwarg; fall back to env.
     try:
         return OpenAI(api_key=key)  # type: ignore
-    except Exception:
-        # Some deployments inject key via env only
+    except TypeError:
         return OpenAI()  # type: ignore
 
 
@@ -94,7 +127,9 @@ def _ensure_legacy_config():
     if openai_legacy is None:
         return False
     try:
-        openai_legacy.api_key = _get_openai_api_key()
+        key = _get_openai_api_key()
+        _ensure_env_has_key(key)
+        openai_legacy.api_key = key
         return True
     except Exception:
         return False
@@ -236,7 +271,6 @@ def safe_json(raw: Any, default: Any = None) -> Any:
         a2, b2 = text.find("["), text.rfind("]")
         candidate_obj = text[a1:b1 + 1] if a1 != -1 and b1 > a1 else None
         candidate_arr = text[a2:b2 + 1] if a2 != -1 and b2 > a2 else None
-        # Prefer object over array if both exist
         return candidate_obj or candidate_arr
 
     cand = _slice_to_json(s)
@@ -259,4 +293,4 @@ def safe_json(raw: Any, default: Any = None) -> Any:
         return default
 
 
-__all__ = ["call_gpt_json", "embed_texts", "safe_json"]
+__all__ = ["call_gpt_json", "embed_texts", "safe_json", "openai_key_diagnostics"]
