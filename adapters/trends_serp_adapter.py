@@ -1,28 +1,28 @@
 # adapters/trends_serp_adapter.py
 from __future__ import annotations
 
-import os, time, asyncio
+import os
+import time
+import asyncio
 from typing import Tuple, List, Dict, Any
 
 import httpx
 from bs4 import BeautifulSoup
 
-# Optional: Streamlit is only used inside try/except to avoid Secrets parsing crashes
+# Optional import of Streamlit so local/unit tests don't blow up
 try:
-    import streamlit as st
-except Exception:
-    st = None  # not running under Streamlit (e.g., unit tests)
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover
+    st = None  # type: ignore
 
 SERP_ENDPOINT = "https://serpapi.com/search.json"
 
-# Same “real browser” headers we used elsewhere to reduce 403s on meta fetches
 BROWSER_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
+        "Chrome/125.0.0.0 Safari/537.36"
+    )
 }
 
 def get_serpapi_key() -> str | None:
@@ -34,12 +34,15 @@ def get_serpapi_key() -> str | None:
     key = os.environ.get("SERPAPI_API_KEY") or os.environ.get("SERP_API_KEY")
     if key:
         return key
-
     # 2) Secrets (guarded)
     if st is not None:
         try:
             # secret schema used in your earlier apps: [serpapi] api_key="..."
-            return st.secrets["serpapi"]["api_key"]
+            sect = st.secrets.get("serpapi", {})  # type: ignore[attr-defined]
+            if isinstance(sect, dict):
+                val = sect.get("api_key")
+                if val:
+                    return val
         except Exception:
             # allow None
             return None
@@ -52,27 +55,31 @@ def _serp_get(params: Dict[str, Any], api_key: str, tries: int = 4, timeout: flo
     """
     q = params.copy()
     q["api_key"] = api_key
+    last_err: Exception | None = None
     for i in range(tries):
         try:
-            with httpx.Client(timeout=timeout) as client:
-                r = client.get(SERP_ENDPOINT, params=q)
+            with httpx.Client(timeout=timeout, headers=BROWSER_HEADERS) as cli:
+                r = cli.get(SERP_ENDPOINT, params=q)
                 if r.status_code == 200:
                     return r.json()
-                # Retry on 429/5xx
                 if r.status_code in (429, 500, 502, 503, 504):
                     raise RuntimeError(f"SerpAPI {r.status_code}")
                 # Non-retriable -> return empty
                 return {}
-        except Exception:
+        except Exception as e:  # pragma: no cover
+            last_err = e
             time.sleep(min(10, 2 ** i))
+    if last_err:
+        raise last_err
     return {}
 
 
 def fetch_trends_and_news(
     api_key: str | None = None,
     *,
-    topic_id: str = "/m/0bl5c2",   # Google Trends topic for ASX 200
-    query: str = "asx 200",        # News query
+    query: str = "asx 200",
+    geo: str = "AU",
+    news_when: str = "4h",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Returns (rising_trends, news_results)
@@ -89,43 +96,53 @@ def fetch_trends_and_news(
     trends_params = {
         "engine": "google_trends",
         "data_type": "RELATED_QUERIES",
-        "q": topic_id,       # use topic id for ASX 200 for more relevance
-        "geo": "AU",
-        "date": "now 4-H",
-        "tz": "-600",
-        "no_cache": "true",
-    }
-    t_json = _serp_get(trends_params, key)
-    related = t_json.get("related_queries", {}) if isinstance(t_json, dict) else {}
-    rising = related.get("rising", []) or []
-
-    # ---- News (Google News via SerpAPI) ----
-    news_params = {
-        "engine": "google",
+        "trend_type": "rising",
         "q": query,
-        "tbm": "nws",                # News vertical
-        "google_domain": "google.com.au",
-        "gl": "au",
+        "geo": geo,
         "hl": "en",
-        "num": "40",
-        "no_cache": "true",
     }
-    n_json = _serp_get(news_params, key)
-    raw_news = n_json.get("news_results", []) or []
+    trends = _serp_get(trends_params, key) or {}
+    rising: List[Dict[str, Any]] = []
+    try:
+        sections = trends.get("related_queries", [])
+        # SerpAPI returns a list of sections; pick first that has rising
+        for sec in sections:
+            rising = sec.get("rising", []) or rising
+        # Normalise
+        rising = [
+            {"query": it.get("query") or it.get("title") or "", "value": it.get("value") or it.get("formattedValue") or 0}
+            for it in rising
+            if it
+        ]
+    except Exception:  # pragma: no cover
+        rising = []
 
-    # Normalise a small subset (title/link/snippet/source/date)
-    news = []
-    for it in raw_news:
-        news.append({
-            "title": it.get("title") or "",
-            "link": it.get("link") or "",
-            "snippet": it.get("snippet") or "",
-            "source": (it.get("source") or {}).get("name") if isinstance(it.get("source"), dict) else it.get("source"),
-            "date": it.get("date"),
-            "thumbnail": (it.get("thumbnail") or {}).get("static") if isinstance(it.get("thumbnail"), dict) else it.get("thumbnail"),
-        })
+    # ---- Google News ----
+    news_params = {
+        "engine": "google_news",
+        "q": query,
+        "gl": geo.lower(),
+        "hl": "en",
+        "when": news_when,  # e.g. 4h
+    }
+    news_json = _serp_get(news_params, key) or {}
+    news_results: List[Dict[str, Any]] = []
+    try:
+        for it in news_json.get("news_results", []):
+            news_results.append(
+                {
+                    "title": it.get("title", ""),
+                    "link": it.get("link", ""),
+                    "snippet": it.get("snippet", ""),
+                    "source": (it.get("source", {}) or {}).get("name") if isinstance(it.get("source"), dict) else it.get("source"),
+                    "date": it.get("date", ""),
+                    "thumbnail": it.get("thumbnail", ""),
+                }
+            )
+    except Exception:  # pragma: no cover
+        news_results = []
 
-    return rising, news
+    return rising, news_results
 
 
 # ------------- Meta-description fetch (async) ----------------
@@ -138,13 +155,17 @@ async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
         if r.status_code != 200:
             return f"HTTP {r.status_code}"
         soup = BeautifulSoup(r.content, "lxml")
+        # Prioritise og:description then name=description
+        og = soup.find("meta", attrs={"property": "og:description"})
+        if og and og.get("content"):
+            return og["content"].strip()
         tag = soup.find("meta", attrs={"name": "description"})
         return (
             tag["content"].strip()
             if tag and "content" in tag.attrs and tag["content"].strip()
             else "No Meta Description"
         )
-    except Exception:
+    except Exception:  # pragma: no cover
         return "Error Fetching Description"
 
 
@@ -153,43 +174,44 @@ async def fetch_meta_descriptions(urls: List[str], limit: int = 8) -> List[str]:
     Concurrently fetch <meta name="description"> for a list of URLs.
     """
     sem = asyncio.Semaphore(limit)
-    async with httpx.AsyncClient() as session:
-        async def bound(u):
-            async with sem:
-                return await _grab_desc(session, u)
-        return await asyncio.gather(*(bound(u) for u in urls))
+
+    async def bounded(url: str) -> str:
+        async with sem:
+            async with httpx.AsyncClient(timeout=15.0, headers=BROWSER_HEADERS, follow_redirects=True) as cli:
+                return await _grab_desc(cli, url)
+
+    tasks = [bounded(u) for u in urls]
+    return await asyncio.gather(*tasks)
 
 
-def enrich_news_with_meta(news_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Adds 'meta_description' to each news dict. Falls back to 'snippet' if meta fails.
-    """
-    urls = [r.get("link", "") for r in news_rows]
+def enrich_news_with_meta(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    urls = [n.get("link", "") for n in news]
     try:
-        metas = asyncio.run(fetch_meta_descriptions(urls))
+        metas = asyncio.run(fetch_meta_descriptions(urls)) if urls else []
     except RuntimeError:
-        # If we're already inside an event loop (rare on Streamlit), do a simple sequential fetch
+        # In case we're already inside an event loop (Streamlit sometimes reuses), use alternative
         metas = []
-        for u in urls:
+        try:
+            loop = asyncio.new_event_loop()
+            metas = loop.run_until_complete(fetch_meta_descriptions(urls))
+        finally:
             try:
-                with httpx.Client() as client:
-                    r = client.get(u, headers=BROWSER_HEADERS, follow_redirects=True, timeout=12.0)
-                    if r.status_code != 200:
-                        metas.append(f"HTTP {r.status_code}")
-                    else:
-                        soup = BeautifulSoup(r.content, "lxml")
-                        tag = soup.find("meta", attrs={"name": "description"})
-                        metas.append(tag["content"].strip() if tag and "content" in tag.attrs else "No Meta Description")
+                loop.close()
             except Exception:
-                metas.append("Error Fetching Description")
+                pass
 
-    out = []
-    for row, meta in zip(news_rows, metas):
+    out: List[Dict[str, Any]] = []
+    for row, meta in zip(news, metas or []):
         d = dict(row)
         if not meta or meta.startswith("HTTP") or meta.startswith("Error"):
             d["meta_description"] = row.get("snippet", "No Meta Description")
         else:
             d["meta_description"] = meta
+        out.append(d)
+    # Append any trailing without metas
+    for row in news[len(out):]:
+        d = dict(row)
+        d["meta_description"] = row.get("snippet", "No Meta Description")
         out.append(d)
     return out
 
