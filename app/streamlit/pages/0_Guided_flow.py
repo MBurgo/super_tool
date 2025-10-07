@@ -16,66 +16,85 @@ from adapters.trends_serp_adapter import (
 # Copywriter adapter
 from adapters.copywriter_mf_adapter import generate as gen_copy
 
-# Sprint / synthetic focus imports (robust fallbacks)
-try:
-    from core.sprint_engine import run_sprint
-except Exception:
-    try:
-        from sprint_engine import run_sprint
-    except Exception:
-        run_sprint = None
+# Sprint engine
+from core.sprint_engine import run_sprint
 
+# Optional loaders
 try:
     from core.tmf_synth_utils import load_personas
 except Exception:
-    try:
-        from tmf_synth_utils import load_personas
-    except Exception:
-        load_personas = None
+    load_personas = None  # type: ignore
 
-st.set_page_config(page_title="Guided Flow", page_icon="🧭")
-st.title("🧭 Guided Campaign Builder (No Sheets)")
+st.set_page_config(page_title="Guided Flow", page_icon="🧭", layout="wide")
+st.title("Guided Flow: Trends → Variants → Synthetic Focus → Finalise")
+
+st.markdown("Start by fetching live AU finance trends, then draft copy, then run a synthetic focus group to iterate.")
 
 # ---- Locate required assets ----
 assets_dir = Path("assets")
-traits_path_candidates = [assets_dir / "traits_config.json", Path("traits_config.json")]
-personas_path_candidates = [assets_dir / "personas.json", Path("personas.json")]
+traits_path_candidates = [
+    assets_dir / "traits_config.json",
+    Path("traits_config.json"),
+    Path("data/traits_config.json"),
+]
+personas_path_candidates = [
+    assets_dir / "personas.json",
+    Path("personas.json"),
+    Path("data/personas.json"),
+]
 
 traits_path = next((p for p in traits_path_candidates if p.exists()), None)
 personas_path = next((p for p in personas_path_candidates if p.exists()), None)
 
 if not traits_path:
-    st.error("Missing traits config at **assets/traits_config.json**. Add that file to the repo.")
+    st.error("Missing traits config. I looked for assets/traits_config.json, ./traits_config.json, and data/traits_config.json.")
 if not personas_path:
-    st.error("Missing personas at **assets/personas.json**. Add that file to the repo.")
+    st.error("Missing personas. I looked for assets/personas.json, ./personas.json, and data/personas.json.")
 
-# ---- Get SerpAPI key (env or secrets) ----
+# Load trait config
+traits_cfg = {}
+default_traits = {}
+try:
+    if traits_path and traits_path.exists():
+        traits_cfg = json.loads(traits_path.read_text(encoding="utf-8"))
+        default_traits = {k: v.get("default","") for k, v in traits_cfg.get("traits", {}).items()}
+except Exception as e:
+    st.warning(f"Traits config read issue: {e}")
+
+# SerpAPI key
 serp_key = get_serpapi_key()
-if serp_key is None:
-    st.warning("SerpAPI key not found. Set env **SERPAPI_API_KEY** or add in secrets as `[serpapi] api_key=\"...\"`.")
 
-# ---- 1) Kick off trend finder ----
-if st.button("🔎 Find live trends & news", disabled=serp_key is None):
-    try:
-        rising, news = fetch_trends_and_news(serp_key)
-        news = enrich_news_with_meta(news)
-        # Build top 10 rising themes
-        themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
-        st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
-    except Exception as e:
-        st.error(f"Trend fetch failed: {e}")
+with st.expander("Live Trends & News", expanded=True):
+    st.caption("Uses SerpAPI: Google Trends (related queries rising) and Google News for AU within last 4 hours.")
+    query = st.text_input("Search theme for news & trends", "asx 200")
+    colA, colB = st.columns([1, 1])
+    with colA:
+        st.write("SerpAPI status:", "✅ key found" if serp_key else "❌ no key")
+    with colB:
+        news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
+
+    if st.button("🔎 Find live trends & news", disabled=serp_key is None):
+        try:
+            rising, news = fetch_trends_and_news(serp_key, query=query, news_when=news_when)
+            news = enrich_news_with_meta(news)
+            # Build top 10 rising themes
+            themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
+            st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
+        except Exception as e:
+            st.error(f"Trend fetch failed: {e}")
 
 data = st.session_state.get("guidance_trends")
 if data:
     st.subheader("Pick a theme to pursue")
     if data["themes"]:
-        choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0)
+        choice = st.radio("Top Rising Queries (AU)", data["themes"], index=0)
+        chosen_theme = choice.split(" — ")[0]
     else:
         st.info("No rising queries from SerpAPI. You can still proceed by typing a theme manually.")
-        choice = st.text_input("Enter a theme", "ASX 200 rally")
+        chosen_theme = st.text_input("Enter a theme", "ASX 200 rally")
 
     if st.button("✍️ Draft initial campaign for this theme"):
-        st.session_state["chosen_theme"] = choice
+        st.session_state["chosen_theme"] = chosen_theme
 
 chosen = st.session_state.get("chosen_theme")
 if chosen and traits_path and personas_path:
@@ -83,37 +102,56 @@ if chosen and traits_path and personas_path:
     st.subheader("Drafting campaign variants…")
     brief = {
         "id": "guided",
-        "hook": chosen.split(" — ")[0] if " — " in chosen else chosen,
-        "details": "Campaign based on live AU rising queries + latest news.",
-        "offer_price": "",
-        "retail_price": "",
-        "offer_term": "",
-        "reports": "",
-        "stocks_to_tease": "",
+        "theme": chosen,
+        "hook": f"Investing insights tied to {chosen}",
+        "details": "Retail investor friendly, educational tone, actionable guidance.",
+        "offer_price": "$99",
+        "offer_term": "12 months",
+        "reports": "New member report bundle",
+        "stocks_to_tease": "2–3 ASX names",
         "quotes_news": "",
-        "length_choice": "📐 Medium (200–500 words)",
-    }
-    traits_cfg = json.loads(traits_path.read_text(encoding="utf-8"))
-    default_traits = {
-        "Urgency": 7, "Data_Richness": 6, "Social_Proof": 6,
-        "Comparative_Framing": 5, "Imagery": 6, "Conversational_Tone": 7,
-        "FOMO": 6, "Repetition": 4,
+        "structure": "Hook, Problem, Insight, Proof, Offer, CTA",
+        "requirements": "Avoid promises. Emphasise risk and education. Include price and term.",
     }
 
-    variants = gen_copy(
-        brief, fmt="sales_page", n=3,
-        trait_cfg=traits_cfg, traits=default_traits,
-        country="Australia",
-        model=st.secrets.get("openai_model", "gpt-4.1") if hasattr(st, "secrets") else "gpt-4.1"
-    )
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        length_choice = st.selectbox(
+            "Length",
+            ["📏 Short (100–200 words)", "📐 Medium (200–500 words)", "📖 Long (500–1500 words)"],
+            index=1,
+        )
+        n_variants = st.slider("Number of variants", 1, 5, 3)
 
-    texts = [v.copy for v in variants] if variants else []
-    if not texts:
-        st.error("No draft variants were generated.")
+    with col2:
+        st.caption("Traits to emphasise (optional)")
+        t_sel = {}
+        for k, v in (traits_cfg.get("traits", {}) or {}).items():
+            if isinstance(v, dict) and "options" in v:
+                t_sel[k] = st.selectbox(k, v["options"], index=0)
+            else:
+                t_sel[k] = st.text_input(k, value=str(default_traits.get(k, "")))
+        traits_in_use = t_sel or default_traits
+
+    with st.spinner("Calling copywriter…"):
+        variants = gen_copy(
+            brief, fmt="sales_page", n=n_variants, trait_cfg=traits_cfg, traits=traits_in_use, country="Australia"
+        )
+
+    if not variants:
+        st.error("Copywriter returned no variants.")
     else:
-        pick = st.radio("Choose a base variant", [f"Variant {i+1}" for i in range(len(texts))], index=0)
-        idx = int(pick.split()[-1]) - 1
-        base_text = texts[idx]
+        # Render variants and let user pick a base
+        idx = st.radio(
+            "Pick a base variant",
+            [f"Variant {i+1}" for i in range(len(variants))],
+            index=0,
+            horizontal=True,
+        )
+        base_index = int(idx.split()[-1]) - 1
+        base = variants[base_index]
+        st.markdown("### Selected base variant")
+        base_text = base.copy
         st.markdown(base_text)
 
         # ---- 3) Focus-test loop (auto revise until pass) ----
@@ -121,57 +159,61 @@ if chosen and traits_path and personas_path:
         if load_personas is not None:
             personas = load_personas(str(personas_path))
         else:
-            # Minimal fallback loader
             pdata = json.loads(personas_path.read_text(encoding="utf-8"))
             personas = pdata["personas"]
 
-        threshold = st.slider("Passing mean intent threshold", 6.0, 9.0, 7.5, 0.1)
+        threshold = st.slider("Passing mean intent threshold", 6.0, 9.5, 7.5, 0.1)
         rounds = st.number_input("Max revision rounds", 1, 5, 3)
 
-        if run_sprint is None:
-            st.error("`run_sprint` not found. Ensure `core/sprint_engine.py` (or `sprint_engine.py`) exists and is importable.")
-        else:
-            if st.button("🧪 Run focus test + auto‑improve"):
-                current = base_text
-                passed = False
-                for r in range(int(rounds)):
-                    # Wrap text like a file object for sprint_engine
-                    class _Text(BytesIO):
-                        name = "copy.txt"
-                    f = _Text(current.encode("utf-8"))
+        if st.button("🧪 Run focus test + auto‑improve"):
+            current = base_text
+            passed = False
+            for r in range(int(rounds)):
+                # Wrap text like a file object for sprint_engine
+                class _Text(BytesIO):
+                    name = "copy.txt"
+                f = _Text(current.encode("utf-8"))
 
-                    summary, df, fig, clusters = run_sprint(
-                        file_obj=f,
-                        segment="All Segments",
-                        persona_groups=personas,
-                        return_cluster_df=True,
-                    )
-                    mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.write(summary)
-                    st.write(f"**Round {r+1} mean intent:** {mean_intent:.2f}/10")
+                summary, df, fig, clusters = run_sprint(
+                    file_obj=f,
+                    segment="All Segments",
+                    persona_groups=personas,
+                    progress_cb=st.progress(0.0),
+                    return_cluster_df=True,
+                )
 
-                    if mean_intent >= threshold:
-                        passed = True
-                        break
+                st.plotly_chart(fig, use_container_width=True)
+                st.markdown(summary)
 
-                    # Build concise feedback brief to improve copy
-                    tips = "\n".join(
-                        [f"- Cluster {int(c['cluster'])}: {c['summary']}" for _, c in clusters.iterrows()]
-                    )
-                    improve_brief = dict(brief)
-                    improve_brief["quotes_news"] = f"Persona feedback themes to address:\n{tips}"
+                mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
+                st.write(f"Mean intent this round: **{mean_intent:.2f}/10**")
+                if mean_intent >= float(threshold):
+                    passed = True
+                    break
 
-                    improved = gen_copy(
-                        improve_brief, fmt="sales_page", n=1,
-                        trait_cfg=traits_cfg, traits=default_traits,
-                        country="Australia",
-                        model=st.secrets.get("openai_model", "gpt-4.1") if hasattr(st, "secrets") else "gpt-4.1"
-                    )
-                    current = improved[0].copy if improved else current
+                # Build improvement brief from lowest cluster feedback
+                if clusters:
+                    worst = min(clusters, key=clusters.get)
+                else:
+                    worst = 0
+                worst_rows = df[df["cluster"] == worst].sort_values("intent").head(5)
+                bullets = "\n".join([f"- {t}" for t in worst_rows["feedback"].tolist()])
 
-                st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
-                st.markdown(current)
+                improve_brief = {
+                    **brief,
+                    "structure": "Keep same structure but address the critique points explicitly.",
+                    "quotes_news": f"Persona critique to address:\n{bullets}",
+                }
+
+                improved = gen_copy(
+                    improve_brief, fmt="sales_page", n=1,
+                    trait_cfg=traits_cfg, traits=traits_in_use,
+                    country="Australia",
+                )
+                current = improved[0].copy if improved else current
+
+            st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
+            st.markdown(current)
 else:
     if not st.session_state.get("guidance_trends"):
         st.info("Click **Find live trends & news** to begin.")
