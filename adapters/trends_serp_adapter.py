@@ -25,27 +25,95 @@ BROWSER_HEADERS = {
     )
 }
 
+
+def _secrets_has(path: List[str]) -> bool:
+    """
+    Return True if st.secrets has the given nested path without raising.
+    Does NOT reveal any values.
+    """
+    if st is None:
+        return False
+    try:
+        cur = st.secrets  # type: ignore[attr-defined]
+        for key in path:
+            try:
+                # Try dict-style first
+                cur = cur[key]  # type: ignore[index]
+            except Exception:
+                # Try .get if available
+                try:
+                    cur = cur.get(key)  # type: ignore[attr-defined]
+                except Exception:
+                    return False
+            if cur is None:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _secrets_get(path: List[str]) -> str | None:
+    """
+    Safely fetch a nested value from st.secrets if present, else None.
+    """
+    if not _secrets_has(path):
+        return None
+    try:
+        cur = st.secrets  # type: ignore[attr-defined]
+        for key in path:
+            try:
+                cur = cur[key]  # type: ignore[index]
+            except Exception:
+                cur = cur.get(key)  # type: ignore[attr-defined]
+        return str(cur) if cur else None
+    except Exception:
+        return None
+
+
+def serp_key_sources() -> Dict[str, Dict[str, bool]]:
+    """
+    Non-sensitive diagnostics: which lookups appear to exist.
+    Does not return or print the key itself.
+    """
+    env_flags = {
+        "SERPAPI_API_KEY": bool(os.environ.get("SERPAPI_API_KEY")),
+        "SERP_API_KEY": bool(os.environ.get("SERP_API_KEY")),
+        "serpapi_api_key": bool(os.environ.get("serpapi_api_key")),
+    }
+    secrets_flags = {
+        "[serpapi].api_key": _secrets_has(["serpapi", "api_key"]),
+        "serpapi_api_key": _secrets_has(["serpapi_api_key"]),
+        "SERPAPI_API_KEY": _secrets_has(["SERPAPI_API_KEY"]),
+        "SERP_API_KEY": _secrets_has(["SERP_API_KEY"]),
+    }
+    return {"env": env_flags, "secrets": secrets_flags}
+
+
 def get_serpapi_key() -> str | None:
     """
-    Prefer environment variables, then fall back to Streamlit secrets if present.
-    Returns None if nothing found. Wraps secrets access to avoid StreamlitSecretNotFoundError.
+    Prefer environment variables, then Streamlit secrets if present.
+    Supports both nested [serpapi].api_key and common flat keys.
+    Returns None if nothing found. Never raises on missing secrets.
     """
     # 1) Env (most reliable on Streamlit Cloud)
-    key = os.environ.get("SERPAPI_API_KEY") or os.environ.get("SERP_API_KEY")
-    if key:
-        return key
-    # 2) Secrets (guarded)
+    for name in ("SERPAPI_API_KEY", "SERP_API_KEY", "serpapi_api_key"):
+        val = os.environ.get(name)
+        if val:
+            return val
+
+    # 2) Secrets (guarded, no isinstance checks that block Streamlit's Secrets object)
     if st is not None:
-        try:
-            # secret schema used in your earlier apps: [serpapi] api_key="..."
-            sect = st.secrets.get("serpapi", {})  # type: ignore[attr-defined]
-            if isinstance(sect, dict):
-                val = sect.get("api_key")
-                if val:
-                    return val
-        except Exception:
-            # allow None
-            return None
+        # Preferred schema: [serpapi] api_key="..."
+        val = _secrets_get(["serpapi", "api_key"])
+        if val:
+            return val
+
+        # Flat fallbacks if someone set a top-level key
+        for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
+            val = _secrets_get([name])
+            if val:
+                return val
+
     return None
 
 
@@ -105,10 +173,9 @@ def fetch_trends_and_news(
     rising: List[Dict[str, Any]] = []
     try:
         sections = trends.get("related_queries", [])
-        # SerpAPI returns a list of sections; pick first that has rising
         for sec in sections:
+            # prefer 'rising' field when present
             rising = sec.get("rising", []) or rising
-        # Normalise
         rising = [
             {"query": it.get("query") or it.get("title") or "", "value": it.get("value") or it.get("formattedValue") or 0}
             for it in rising
@@ -155,7 +222,6 @@ async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
         if r.status_code != 200:
             return f"HTTP {r.status_code}"
         soup = BeautifulSoup(r.content, "lxml")
-        # Prioritise og:description then name=description
         og = soup.find("meta", attrs={"property": "og:description"})
         if og and og.get("content"):
             return og["content"].strip()
@@ -170,9 +236,6 @@ async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
 
 
 async def fetch_meta_descriptions(urls: List[str], limit: int = 8) -> List[str]:
-    """
-    Concurrently fetch <meta name="description"> for a list of URLs.
-    """
     sem = asyncio.Semaphore(limit)
 
     async def bounded(url: str) -> str:
@@ -208,7 +271,6 @@ def enrich_news_with_meta(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         else:
             d["meta_description"] = meta
         out.append(d)
-    # Append any trailing without metas
     for row in news[len(out):]:
         d = dict(row)
         d["meta_description"] = row.get("snippet", "No Meta Description")
@@ -218,6 +280,7 @@ def enrich_news_with_meta(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 __all__ = [
     "get_serpapi_key",
+    "serp_key_sources",
     "fetch_trends_and_news",
     "fetch_meta_descriptions",
     "enrich_news_with_meta",
