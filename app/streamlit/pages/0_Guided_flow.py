@@ -1,15 +1,15 @@
 # app/streamlit/pages/0_Guided_flow.py
 import _bootstrap  # ensures project root is on sys.path
+import os
 from io import BytesIO
 from pathlib import Path
 import json
 import numpy as np
 import streamlit as st
 
-# Trends adapter (exports all needed functions)
+# Trends adapter
 from adapters.trends_serp_adapter import (
     get_serpapi_key,
-    serp_key_sources,
     fetch_trends_and_news,
     enrich_news_with_meta,
 )
@@ -20,16 +20,9 @@ from adapters.copywriter_mf_adapter import generate as gen_copy
 # Sprint engine
 from core.sprint_engine import run_sprint
 
-# Optional loaders
-try:
-    from core.tmf_synth_utils import load_personas
-except Exception:
-    load_personas = None  # type: ignore
-
 st.set_page_config(page_title="Guided Flow", page_icon="🧭", layout="wide")
 st.title("Guided Flow: Trends → Variants → Synthetic Focus → Finalise")
-
-st.markdown("Fetch live AU finance trends, draft copy, and iterate with a synthetic focus group until the intent target is hit.")
+st.caption("Live AU finance trends, draft copy, iterate with synthetic personas until intent target is met.")
 
 # ---- Locate required assets ----
 assets_dir = Path("assets")
@@ -62,27 +55,74 @@ try:
 except Exception as e:
     st.warning(f"Traits config read issue: {e}")
 
-# SerpAPI key + safe diagnostics
+# SerpAPI key
 serp_key = get_serpapi_key()
-srcs = serp_key_sources()
 
 with st.expander("Live Trends & News", expanded=True):
-    st.caption("Uses SerpAPI: Google Trends (related queries rising) and Google News for AU within the selected window.")
+    st.caption("Uses SerpAPI: Google Trends (rising related queries) and Google News for AU within the chosen window.")
     query = st.text_input("Search theme for news & trends", "asx 200")
     colA, colB, colC = st.columns([1, 1, 2])
+
     with colA:
         st.write("SerpAPI status:", "✅ key found" if serp_key else "❌ no key")
+
     with colB:
         news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
-    with colC:
-        with st.popover("🔧 Key detection details"):
-            st.markdown("**Environment**")
-            st.write({k: bool(v) for k, v in srcs["env"].items()})
-            st.markdown("**Secrets**")
-            st.write({k: bool(v) for k, v in srcs["secrets"].items()})
-            st.caption("Values are never shown. If `[serpapi].api_key` is True, the app can read your key.")
 
-    # Let the user try even if detection fails, but show a clear error if it does
+    with colC:
+        # Safe diagnostics that never reveal the value
+        def _diag():
+            env_flags = {
+                "SERPAPI_API_KEY": bool(os.environ.get("SERPAPI_API_KEY")),
+                "SERP_API_KEY": bool(os.environ.get("SERP_API_KEY")),
+                "serpapi_api_key": bool(os.environ.get("serpapi_api_key")),
+            }
+            secrets_flags = {"[serpapi].api_key": False, "serpapi_api_key": False, "SERPAPI_API_KEY": False, "SERP_API_KEY": False}
+            try:
+                s = st.secrets  # type: ignore[attr-defined]
+                # nested section
+                try:
+                    sect = s["serpapi"]  # type: ignore[index]
+                    try:
+                        secrets_flags["[serpapi].api_key"] = bool(sect.get("api_key"))  # type: ignore[attr-defined]
+                    except Exception:
+                        secrets_flags["[serpapi].api_key"] = bool(sect["api_key"])  # type: ignore[index]
+                except Exception:
+                    try:
+                        sect = s.get("serpapi")  # type: ignore[attr-defined]
+                        if sect:
+                            try:
+                                secrets_flags["[serpapi].api_key"] = bool(sect.get("api_key"))  # type: ignore[attr-defined]
+                            except Exception:
+                                secrets_flags["[serpapi].api_key"] = False
+                    except Exception:
+                        pass
+                # flat fallbacks
+                for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
+                    try:
+                        secrets_flags[name] = bool(s[name])  # type: ignore[index]
+                    except Exception:
+                        try:
+                            secrets_flags[name] = bool(s.get(name))  # type: ignore[attr-defined]
+                        except Exception:
+                            secrets_flags[name] = False
+            except Exception:
+                pass
+            return {"env": env_flags, "secrets": secrets_flags}
+
+        if hasattr(st, "popover"):
+            with st.popover("🔧 Key detection details"):
+                di = _diag()
+                st.markdown("**Environment**")
+                st.write(di["env"])
+                st.markdown("**Secrets**")
+                st.write(di["secrets"])
+                st.caption("Values are never shown. If `[serpapi].api_key` is True, the app can read your key.")
+        else:
+            if st.checkbox("Show key detection details"):
+                st.write(_diag())
+
+    # Allow the click even if detection fails; we error nicely if SerpAPI rejects us
     if st.button("🔎 Find live trends & news"):
         try:
             rising, news = fetch_trends_and_news(serp_key, query=query, news_when=news_when)
@@ -164,11 +204,7 @@ if chosen and traits_path and personas_path:
         st.markdown(base_text)
 
         # ---- 3) Focus-test loop (auto revise until pass) ----
-        if load_personas is not None:
-            personas = load_personas(str(personas_path))
-        else:
-            pdata = json.loads(personas_path.read_text(encoding="utf-8"))
-            personas = pdata["personas"]
+        personas = json.loads(personas_path.read_text(encoding="utf-8")).get("personas", [])
 
         threshold = st.slider("Passing mean intent threshold", 6.0, 9.5, 7.5, 0.1)
         rounds = st.number_input("Max revision rounds", 1, 5, 3)
