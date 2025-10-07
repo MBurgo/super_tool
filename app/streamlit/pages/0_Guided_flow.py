@@ -7,17 +7,15 @@ import json
 import numpy as np
 import streamlit as st
 
-# Trends adapter
+import adapters.trends_serp_adapter as serp_adapter
 from adapters.trends_serp_adapter import (
     get_serpapi_key,
+    serp_key_diagnostics,
     fetch_trends_and_news,
     enrich_news_with_meta,
 )
 
-# Copywriter adapter
 from adapters.copywriter_mf_adapter import generate as gen_copy
-
-# Sprint engine
 from core.sprint_engine import run_sprint
 
 st.set_page_config(page_title="Guided Flow", page_icon="🧭", layout="wide")
@@ -55,74 +53,49 @@ try:
 except Exception as e:
     st.warning(f"Traits config read issue: {e}")
 
-# SerpAPI key
-serp_key = get_serpapi_key()
+# Helper to recompute key each render
+def _current_serp_key() -> str | None:
+    k = get_serpapi_key()
+    st.session_state["serpapi_key_present"] = bool(k and k.strip())
+    return k
 
 with st.expander("Live Trends & News", expanded=True):
-    st.caption("Uses SerpAPI: Google Trends (rising related queries) and Google News for AU within the chosen window.")
-    query = st.text_input("Search theme for news & trends", "asx 200")
-    colA, colB, colC = st.columns([1, 1, 2])
+    st.caption("Uses SerpAPI: Google Trends (rising related queries) and Google News for AU within your chosen window.")
 
+    # Always recompute, no stale caching
+    serp_key = _current_serp_key()
+
+    colA, colB = st.columns([1, 1])
     with colA:
         st.write("SerpAPI status:", "✅ key found" if serp_key else "❌ no key")
-
     with colB:
-        news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
-
-    with colC:
-        # Safe diagnostics that never reveal the value
-        def _diag():
-            env_flags = {
-                "SERPAPI_API_KEY": bool(os.environ.get("SERPAPI_API_KEY")),
-                "SERP_API_KEY": bool(os.environ.get("SERP_API_KEY")),
-                "serpapi_api_key": bool(os.environ.get("serpapi_api_key")),
-            }
-            secrets_flags = {"[serpapi].api_key": False, "serpapi_api_key": False, "SERPAPI_API_KEY": False, "SERP_API_KEY": False}
+        if st.button("🔄 Recheck key"):
             try:
-                s = st.secrets  # type: ignore[attr-defined]
-                # nested section
-                try:
-                    sect = s["serpapi"]  # type: ignore[index]
-                    try:
-                        secrets_flags["[serpapi].api_key"] = bool(sect.get("api_key"))  # type: ignore[attr-defined]
-                    except Exception:
-                        secrets_flags["[serpapi].api_key"] = bool(sect["api_key"])  # type: ignore[index]
-                except Exception:
-                    try:
-                        sect = s.get("serpapi")  # type: ignore[attr-defined]
-                        if sect:
-                            try:
-                                secrets_flags["[serpapi].api_key"] = bool(sect.get("api_key"))  # type: ignore[attr-defined]
-                            except Exception:
-                                secrets_flags["[serpapi].api_key"] = False
-                    except Exception:
-                        pass
-                # flat fallbacks
-                for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
-                    try:
-                        secrets_flags[name] = bool(s[name])  # type: ignore[index]
-                    except Exception:
-                        try:
-                            secrets_flags[name] = bool(s.get(name))  # type: ignore[attr-defined]
-                        except Exception:
-                            secrets_flags[name] = False
+                st.rerun()
             except Exception:
-                pass
-            return {"env": env_flags, "secrets": secrets_flags}
+                st.experimental_rerun()
 
-        if hasattr(st, "popover"):
-            with st.popover("🔧 Key detection details"):
-                di = _diag()
-                st.markdown("**Environment**")
-                st.write(di["env"])
-                st.markdown("**Secrets**")
-                st.write(di["secrets"])
-                st.caption("Values are never shown. If `[serpapi].api_key` is True, the app can read your key.")
-        else:
-            if st.checkbox("Show key detection details"):
-                st.write(_diag())
+    # Visible, non-leaky diagnostics so you can prove what's loading
+    diag = serp_key_diagnostics()
+    st.markdown("**Key detection diagnostic (never shows values):**")
+    st.code(
+        json.dumps(
+            {
+                "adapter_version": diag.get("adapter_version"),
+                "module_path": diag.get("module_path"),
+                "env_value_lengths": diag.get("env_value_lengths"),
+                "secrets_value_lengths": diag.get("secrets_value_lengths"),
+            },
+            indent=2,
+        ),
+        language="json",
+    )
+    st.caption("If `[serpapi].api_key` length > 0 here, the app can read your key from Streamlit Secrets.")
 
-    # Allow the click even if detection fails; we error nicely if SerpAPI rejects us
+    query = st.text_input("Search theme for news & trends", "asx 200")
+    news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
+
+    # Allow running even if the status line says no key; the fetch will re-check and error clearly if missing
     if st.button("🔎 Find live trends & news"):
         try:
             rising, news = fetch_trends_and_news(serp_key, query=query, news_when=news_when)
