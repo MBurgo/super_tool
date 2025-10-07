@@ -25,69 +25,44 @@ BROWSER_HEADERS = {
     )
 }
 
-
-def _secrets_has(path: List[str]) -> bool:
-    """
-    Return True if st.secrets has the given nested path without raising.
-    Does NOT reveal any values.
-    """
+def _secrets_try_get(section: str, key: str) -> str | None:
     if st is None:
-        return False
-    try:
-        cur = st.secrets  # type: ignore[attr-defined]
-        for key in path:
-            try:
-                # Try dict-style first
-                cur = cur[key]  # type: ignore[index]
-            except Exception:
-                # Try .get if available
-                try:
-                    cur = cur.get(key)  # type: ignore[attr-defined]
-                except Exception:
-                    return False
-            if cur is None:
-                return False
-        return True
-    except Exception:
-        return False
-
-
-def _secrets_get(path: List[str]) -> str | None:
-    """
-    Safely fetch a nested value from st.secrets if present, else None.
-    """
-    if not _secrets_has(path):
         return None
     try:
-        cur = st.secrets  # type: ignore[attr-defined]
-        for key in path:
+        sec = None
+        try:
+            sec = st.secrets[section]  # type: ignore[index]
+        except Exception:
             try:
-                cur = cur[key]  # type: ignore[index]
+                sec = st.secrets.get(section)  # type: ignore[attr-defined]
             except Exception:
-                cur = cur.get(key)  # type: ignore[attr-defined]
-        return str(cur) if cur else None
+                sec = None
+        if not sec:
+            return None
+        # section may behave like a dict or a mapping-like object
+        try:
+            val = sec[key]  # type: ignore[index]
+            return str(val) if val else None
+        except Exception:
+            try:
+                val = sec.get(key)  # type: ignore[attr-defined]
+                return str(val) if val else None
+            except Exception:
+                return None
     except Exception:
         return None
 
-
-def serp_key_sources() -> Dict[str, Dict[str, bool]]:
-    """
-    Non-sensitive diagnostics: which lookups appear to exist.
-    Does not return or print the key itself.
-    """
-    env_flags = {
-        "SERPAPI_API_KEY": bool(os.environ.get("SERPAPI_API_KEY")),
-        "SERP_API_KEY": bool(os.environ.get("SERP_API_KEY")),
-        "serpapi_api_key": bool(os.environ.get("serpapi_api_key")),
-    }
-    secrets_flags = {
-        "[serpapi].api_key": _secrets_has(["serpapi", "api_key"]),
-        "serpapi_api_key": _secrets_has(["serpapi_api_key"]),
-        "SERPAPI_API_KEY": _secrets_has(["SERPAPI_API_KEY"]),
-        "SERP_API_KEY": _secrets_has(["SERP_API_KEY"]),
-    }
-    return {"env": env_flags, "secrets": secrets_flags}
-
+def _secrets_try_flat(name: str) -> str | None:
+    if st is None:
+        return None
+    try:
+        try:
+            val = st.secrets[name]  # type: ignore[index]
+        except Exception:
+            val = st.secrets.get(name)  # type: ignore[attr-defined]
+        return str(val) if val else None
+    except Exception:
+        return None
 
 def get_serpapi_key() -> str | None:
     """
@@ -101,21 +76,16 @@ def get_serpapi_key() -> str | None:
         if val:
             return val
 
-    # 2) Secrets (guarded, no isinstance checks that block Streamlit's Secrets object)
-    if st is not None:
-        # Preferred schema: [serpapi] api_key="..."
-        val = _secrets_get(["serpapi", "api_key"])
+    # 2) Secrets (guarded)
+    val = _secrets_try_get("serpapi", "api_key")
+    if val:
+        return val
+    for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
+        val = _secrets_try_flat(name)
         if val:
             return val
 
-        # Flat fallbacks if someone set a top-level key
-        for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
-            val = _secrets_get([name])
-            if val:
-                return val
-
     return None
-
 
 def _serp_get(params: Dict[str, Any], api_key: str, tries: int = 4, timeout: float = 30.0) -> Dict[str, Any]:
     """
@@ -140,7 +110,6 @@ def _serp_get(params: Dict[str, Any], api_key: str, tries: int = 4, timeout: flo
     if last_err:
         raise last_err
     return {}
-
 
 def fetch_trends_and_news(
     api_key: str | None = None,
@@ -174,7 +143,6 @@ def fetch_trends_and_news(
     try:
         sections = trends.get("related_queries", [])
         for sec in sections:
-            # prefer 'rising' field when present
             rising = sec.get("rising", []) or rising
         rising = [
             {"query": it.get("query") or it.get("title") or "", "value": it.get("value") or it.get("formattedValue") or 0}
@@ -211,7 +179,6 @@ def fetch_trends_and_news(
 
     return rising, news_results
 
-
 # ------------- Meta-description fetch (async) ----------------
 
 async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
@@ -234,7 +201,6 @@ async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
     except Exception:  # pragma: no cover
         return "Error Fetching Description"
 
-
 async def fetch_meta_descriptions(urls: List[str], limit: int = 8) -> List[str]:
     sem = asyncio.Semaphore(limit)
 
@@ -245,7 +211,6 @@ async def fetch_meta_descriptions(urls: List[str], limit: int = 8) -> List[str]:
 
     tasks = [bounded(u) for u in urls]
     return await asyncio.gather(*tasks)
-
 
 def enrich_news_with_meta(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     urls = [n.get("link", "") for n in news]
@@ -277,10 +242,8 @@ def enrich_news_with_meta(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append(d)
     return out
 
-
 __all__ = [
     "get_serpapi_key",
-    "serp_key_sources",
     "fetch_trends_and_news",
     "fetch_meta_descriptions",
     "enrich_news_with_meta",
