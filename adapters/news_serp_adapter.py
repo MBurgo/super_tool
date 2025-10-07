@@ -1,10 +1,11 @@
 # adapters/news_serp_adapter.py
-# Python 3.11 compatible. Robust SerpAPI Google News fetch, de-dupe, host balancing, and simple article text extraction.
+# Python 3.11 compatible. Robust SerpAPI Google News fetch, de-dupe, host balancing,
+# URL normalization, and simple article text extraction.
 
 from typing import Optional, List, Dict, Any, Tuple
 import os
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, urljoin
 
 # Lazy optional deps so import never dies
 try:
@@ -37,7 +38,7 @@ BROWSER_HEADERS: Dict[str, str] = {
     )
 }
 
-ADAPTER_VERSION = "news_serp_adapter/2025-10-07"
+ADAPTER_VERSION = "news_serp_adapter/2025-10-07b"
 
 
 # ---------------- Secrets ----------------
@@ -106,6 +107,30 @@ def _http_get_text(url: str, timeout: float = 15.0) -> str:
     return ""
 
 
+# ---------------- URL normalization ----------------
+
+def _normalize_url(u: str) -> str:
+    """
+    Return a safe absolute HTTP(S) URL or empty string. Fixes scheme-less forms like
+    'www.afr.com/...' and protocol-relative '//example.com/...'. Skips non-http schemes.
+    """
+    if not u:
+        return ""
+    u = u.strip()
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    if u.startswith("//"):
+        return "https:" + u
+    p = urlparse(u)
+    # Handle 'www.example.com/path' without scheme
+    if p.scheme == "" and p.netloc and p.path:
+        return "https://" + u
+    # Relative paths like '/article/...': we can't guess host; reject
+    if p.scheme in ("http", "https"):
+        return u
+    return ""
+
+
 # ---------------- News search ----------------
 
 def search_google_news(
@@ -140,9 +165,10 @@ def search_google_news(
     for it in raw:
         src = it.get("source", {})
         source_name = src.get("name") if isinstance(src, dict) else src
+        link = _normalize_url(it.get("link", "") or "")
         rows.append({
             "title": it.get("title", "") or "",
-            "link": it.get("link", "") or "",
+            "link": link,
             "snippet": it.get("snippet", "") or "",
             "source": source_name or "",
             "date": it.get("date", "") or "",
@@ -165,7 +191,10 @@ def search_google_news(
         seen.add(keyt)
         deduped.append(r)
 
-    # Host balancing: avoid 10 from the same publisher
+    # Filter out items with empty/invalid links
+    deduped = [r for r in deduped if _normalize_url(r.get("link", ""))]
+
+    # Host balancing: avoid 10 from the same publisher/host
     by_host: Dict[str, List[Dict[str, Any]]] = {}
     for r in deduped:
         host = urlparse(r.get("link", "")).netloc.lower()
@@ -236,9 +265,20 @@ def extract_readable_text(html: str) -> str:
     return text.strip()
 
 def fetch_articles_content(urls: List[str], limit: int = 15, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    """
+    Fetch a small set of article bodies. Skips URLs without http/https. Returns
+    [{url, text, ok}] entries; 'text' may be empty if fetch/extract fails.
+    """
     out: List[Dict[str, Any]] = []
     for url in urls[:limit]:
-        html = _http_get_text(url, timeout=timeout)
-        body = extract_readable_text(html) if html else ""
-        out.append({"url": url, "text": body})
+        norm = _normalize_url(url or "")
+        if not norm:
+            out.append({"url": url, "text": "", "ok": False})
+            continue
+        try:
+            html = _http_get_text(norm, timeout=timeout)
+            body = extract_readable_text(html) if html else ""
+            out.append({"url": norm, "text": body, "ok": bool(body)})
+        except Exception:
+            out.append({"url": norm, "text": "", "ok": False})
     return out
