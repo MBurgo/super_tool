@@ -6,7 +6,7 @@ import os
 import time
 import re
 
-ADAPTER_VERSION = "2025-10-07d"
+ADAPTER_VERSION = "2025-10-07e"
 SERP_ENDPOINT = "https://serpapi.com/search.json"
 
 # Optional imports guarded so module import never fails
@@ -76,13 +76,19 @@ def get_serpapi_key() -> Optional[str]:
 
 
 def serp_key_diagnostics() -> Dict[str, Any]:
+    """Return lengths only. Never the actual key."""
     env = {
         "SERPAPI_API_KEY": len(os.environ.get("SERPAPI_API_KEY", "")) or 0,
         "SERP_API_KEY": len(os.environ.get("SERP_API_KEY", "")) or 0,
         "serpapi_api_key": len(os.environ.get("serpapi_api_key", "")) or 0,
     }
     secrets = {"[serpapi].api_key": 0, "serpapi_api_key": 0, "SERPAPI_API_KEY": 0, "SERP_API_KEY": 0}
+    secrets_top: List[str] = []
     if st is not None:
+        try:
+            secrets_top = list(getattr(st, "secrets", {}).keys())  # type: ignore
+        except Exception:
+            secrets_top = []
         v = _nested_get(st.secrets, ["serpapi", "api_key"])  # type: ignore[arg-type]
         secrets["[serpapi].api_key"] = len(v) if isinstance(v, str) else 0
         for name in ("serpapi_api_key", "SERPAPI_API_KEY", "SERP_API_KEY"):
@@ -93,6 +99,7 @@ def serp_key_diagnostics() -> Dict[str, Any]:
         "module_path": __file__,
         "env_value_lengths": env,
         "secrets_value_lengths": secrets,
+        "secrets_top_level_keys": secrets_top,
     }
 
 
