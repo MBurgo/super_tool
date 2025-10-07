@@ -145,3 +145,61 @@ def test_execute_focus_testing_requires_preparation():
             max_rounds=1,
         )
 
+
+def test_guided_flow_happy_path_transitions():
+    """Ensure each stage in the guided workflow succeeds in sequence."""
+
+    state = GuidedFlowState()
+
+    payload = discover_trends(
+        state,
+        lambda: (
+            [
+                {"query": "Quantum ETFs", "value": 88},
+                {"query": "Battery metals", "value": 76},
+            ],
+            [{"title": "Investors rotate into next-gen funds"}],
+        ),
+    )
+
+    assert state.stage == "choose_theme"
+    assert payload.themes[0].startswith("Quantum ETFs")
+
+    choose_theme(state, payload.themes[0])
+    assert state.stage == "draft_variants"
+
+    variants = generate_variants(state, lambda: ["Copy V1", "Copy V2"])
+    assert variants == ["Copy V1", "Copy V2"]
+    assert state.variants == variants
+
+    begin_focus_testing(state, variants[0])
+    assert state.stage == "focus_test"
+    assert state.focus_source == "Copy V1"
+
+    def tester(copy: str, round_idx: int) -> FocusTestIteration:
+        score = 0.85 if round_idx >= 2 else 0.65
+        return FocusTestIteration(
+            round=round_idx,
+            copy=copy,
+            summary=f"Round {round_idx} feedback",
+            mean_intent=score,
+        )
+
+    def improver(copy: str, iteration: FocusTestIteration) -> str:
+        return copy + " (refined)"
+
+    outcome = execute_focus_testing(
+        state,
+        tester,
+        improver,
+        threshold=0.8,
+        max_rounds=3,
+    )
+
+    assert state.stage == "complete"
+    assert outcome.passed is True
+    assert len(outcome.iterations) == 2
+    assert outcome.final_copy.endswith("(refined)")
+    assert state.focus_result is outcome
+    assert state.focus_source == outcome.final_copy
+
