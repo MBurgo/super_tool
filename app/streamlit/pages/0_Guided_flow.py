@@ -1,134 +1,120 @@
 # app/streamlit/pages/0_Guided_Flow.py
-# ─────────────────────────────────────────────────────────────────────────────
-# Guided Campaign Builder (no Sheets). Robust imports + graceful fallbacks.
-# ─────────────────────────────────────────────────────────────────────────────
-import sys, os
-from pathlib import Path
-
-# --- Robust path bootstrap (works from inside /app/streamlit/pages) ----------
-_THIS = Path(__file__).resolve()
-STREAMLIT_DIR = _THIS.parent                 # .../app/streamlit/pages
-APP_DIR       = STREAMLIT_DIR.parent         # .../app/streamlit
-PROJECT_DIR   = APP_DIR.parent               # .../app
-REPO_ROOT     = PROJECT_DIR.parent           # repo root (where core/, adapters/, assets/ live)
-
-for p in [str(REPO_ROOT), str(PROJECT_DIR), str(APP_DIR)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
+import _bootstrap
 import streamlit as st
 from io import BytesIO
 import numpy as np
-import json
+import json, pathlib, os
 
-# --- Imports with fallbacks ---------------------------------------------------
-# Trends fetcher (requests-based SerpAPI; no serpapi lib required)
-try:
-    from adapters.trends_serp_adapter import fetch_trends_and_news
-except Exception as e:
-    fetch_trends_and_news = None
-
-# Copy generator
-try:
-    from adapters.copywriter_mf_adapter import generate as gen_copy
-except Exception as e:
-    gen_copy = None
-
-# Sprint engine (NumPy-only k-means + Altair chart)
+# ── Adapters & engines (with safe fallbacks for import paths) ──────────
+from adapters.trends_serp_adapter import fetch_trends_and_news
+from adapters.copywriter_mf_adapter import generate as gen_copy
 try:
     from core.sprint_engine import run_sprint
 except Exception:
-    # Fallback to root-level sprint_engine.py if present
-    try:
-        from sprint_engine import run_sprint  # type: ignore
-    except Exception:
-        run_sprint = None
-
-# Personas loader
-try:
-    from core.tmf_synth_utils import load_personas
-except Exception:
-    try:
-        from tmf_synth_utils import load_personas  # type: ignore
-    except Exception:
-        load_personas = None
+    # fallback if the file sits at project root
+    from sprint_engine import run_sprint
+from tmf_synth_utils import load_personas
 
 st.set_page_config(page_title="Guided Flow", page_icon="🧭")
 st.title("🧭 Guided Campaign Builder (No Sheets)")
 
-# --- Guard rails for missing modules -----------------------------------------
-missing = []
-if fetch_trends_and_news is None:
-    missing.append("adapters/trends_serp_adapter.py")
-if gen_copy is None:
-    missing.append("adapters/copywriter_mf_adapter.py")
-if run_sprint is None:
-    missing.append("core/sprint_engine.py (or sprint_engine.py)")
-if load_personas is None:
-    missing.append("core/tmf_synth_utils.py (or tmf_synth_utils.py)")
+# ── Default trait rules (used if assets/traits_config.json is missing) ──
+TRAITS_DEFAULT = {
+    "Urgency": {
+        "high_threshold": 8, "low_threshold": 3,
+        "high_rule": "- Include a clear deadline phrase in both the headline/subject **and** the CTA (e.g., “midnight”, an explicit date, “today only”).",
+        "mid_rule": "- Refer to timing **once only** (e.g., “later this week”) and use **no more than one** urgency synonym such as “quickly”, “act now”, “limited”, etc. Do not include hard countdowns or explicit deadlines.",
+        "low_rule": "- DO NOT use countdowns, deadline words, scarcity cues or time‑pressure phrases; keep tone calm and informational.",
+        "high_exemplar_allowed": True
+    },
+    "Data_Richness": {
+        "high_threshold": 7, "low_threshold": 3,
+        "high_rule": "- Cite at least **one** specific numeric performance figure (percentage return, CAGR, dollar amount, member count, etc.).",
+        "mid_rule": "- You may use **one** light data point or ranking (e.g., “top‑quartile performer”), but no detailed stats tables or multiple figures.",
+        "low_rule": "- Avoid statistics, percentages and dollar figures; rely purely on qualitative proof.",
+        "high_exemplar_allowed": False
+    },
+    "Social_Proof": {
+        "high_threshold": 6, "low_threshold": 3,
+        "high_rule": "- Provide **three or more** credibility builders (testimonials, membership count, expert quote, third‑party award).",
+        "mid_rule": "- Include **one** credibility builder (e.g., “trusted by 80,000 members”) but no lengthy testimonial blocks.",
+        "low_rule": "- Omit testimonials, expert quotes, awards and membership numbers.",
+        "high_exemplar_allowed": False
+    },
+    "Conversational_Tone": {
+        "high_threshold": 8, "low_threshold": 3,
+        "high_rule": "- Write in second‑person, use contractions, occasional rhetorical questions and short, friendly sentences.",
+        "mid_rule": "- Use clear, neutral language (mix of second‑ and third‑person is fine). **Do not open with informal greetings (e.g., “Hi”, “Hey”, “Hi there”) or rhetorical questions.** Avoid more than one contraction per paragraph.",
+        "low_rule": "- Write in third‑person, avoid contractions and questions; maintain a neutral, formal register.",
+        "high_exemplar_allowed": False
+    },
+    "Imagery": {
+        "high_threshold": 8, "low_threshold": 3,
+        "high_rule": "- Use vivid metaphors or visual comparisons (e.g., snowball, rocket, tidal wave) to illustrate key points.",
+        "mid_rule": "- Allow **one** mild metaphor or descriptive adjective; otherwise keep language straightforward.",
+        "low_rule": "- Avoid metaphors and descriptive imagery; keep language literal. Use **no more than two adjectives** per paragraph.",
+        "high_exemplar_allowed": False
+    },
+    "Comparative_Framing": {
+        "high_threshold": 7, "low_threshold": 3,
+        "high_rule": "- Draw explicit historical or sector comparisons (e.g., “like buying Netflix in 2002” or “this decade’s oil rush”).",
+        "mid_rule": "- Use a single light comparison (e.g., “similar to past tech booms”) without deep storytelling.",
+        "low_rule": "- Do not reference historical comparisons or analogies; focus only on the present opportunity.",
+        "high_exemplar_allowed": False
+    },
+    "FOMO": {
+        "high_threshold": 7, "low_threshold": 3,
+        "high_rule": "- Highlight the emotional cost of missing out and potential regret (e.g., “don’t be left behind”).",
+        "mid_rule": "- Note that the offer is attractive and may not last, **but do not mention regret, fear, or missing out.** Words such as “popular” or “worth considering soon” are acceptable.",
+        "low_rule": "- Avoid any fear‑of‑missing‑out language or emotional urgency; present benefits objectively.",
+        "high_exemplar_allowed": False
+    },
+    "Repetition": {
+        "high_threshold": 6, "low_threshold": 2,
+        "high_rule": "- Reinforce the main offer or deadline with **deliberate repetition** for emphasis (no more than two repeats).",
+        "mid_rule": "- Restate the offer once in a different phrase; avoid obvious repetition techniques.",
+        "low_rule": "- State each point only once; avoid repeated phrases entirely.",
+        "high_exemplar_allowed": False
+    }
+}
 
-if missing:
-    st.error(
-        "Missing modules: " + ", ".join(missing) +
-        "\n\n• Ensure these files exist in your repo.\n"
-        "• This page bootstraps paths automatically, so no extra sys.path hacks are needed.\n"
-        f"• Expected repo root: {REPO_ROOT}"
-    )
-    st.stop()
+def _load_traits_cfg() -> dict:
+    cfg_path = pathlib.Path("assets/traits_config.json")
+    if cfg_path.exists():
+        try:
+            return json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            st.warning(f"Could not parse assets/traits_config.json, using built-in defaults. ({e})")
+    else:
+        st.info("No assets/traits_config.json found. Using built-in trait rules.")
+    return TRAITS_DEFAULT
 
-# --- Config files & defaults --------------------------------------------------
-TRAITS_CFG_PATH = REPO_ROOT / "assets" / "traits_config.json"
-PERSONAS_PATH   = REPO_ROOT / "assets" / "personas.json"
+def _need(var: str, where: str = "secrets") -> str:
+    if var == "SERP_API_KEY":
+        # We keep the original structure: st.secrets['serpapi']['api_key']
+        try:
+            return st.secrets["serpapi"]["api_key"]
+        except Exception:
+            st.error("Missing SerpAPI key. Add to secrets as:\n\n[serpapi]\napi_key = \"YOUR_KEY\"")
+            st.stop()
+    return ""
 
-if not TRAITS_CFG_PATH.exists():
-    st.error(f"Missing traits config at {TRAITS_CFG_PATH}. Add assets/traits_config.json.")
-    st.stop()
-
-if not PERSONAS_PATH.exists():
-    st.error(f"Missing personas at {PERSONAS_PATH}. Add assets/personas.json.")
-    st.stop()
-
-trait_cfg = json.loads(TRAITS_CFG_PATH.read_text(encoding="utf-8"))
-personas  = load_personas(str(PERSONAS_PATH))  # returns data["personas"]
-
-# --- Controls ----------------------------------------------------------------
-st.caption("This flow pulls live rising queries + news via SerpAPI, drafts campaign copy, then refines it with a synthetic focus test.")
-colA, colB = st.columns([1,1])
-with colA:
-    threshold = st.slider("Passing mean intent threshold", 6.0, 9.5, 7.5, 0.1)
-with colB:
-    max_rounds = st.number_input("Max revision rounds", 1, 6, 3)
-
-# --- 1) Kick off trend finder -------------------------------------------------
-if st.button("🔎 Find live trends & news", type="primary"):
-    serp_key = (
-        st.secrets.get("serpapi", {}).get("api_key")
-        if hasattr(st, "secrets") else None
-    ) or os.getenv("SERP_API_KEY")
-
-    if not serp_key:
-        st.error("No SerpAPI key found. Add `[serpapi].api_key` to Streamlit secrets or set SERP_API_KEY env var.")
-        st.stop()
-
+# ── 1) Kick off trend finder ───────────────────────────────────────────
+if st.button("🔎 Find live trends & news"):
+    serp_key = _need("SERP_API_KEY", "secrets")
     rising, news = fetch_trends_and_news(serp_key)
-    # Reduce to top 10 rising by value if present
-    def _val(x): 
-        v = x.get("value", 0)
-        try: return float(v)
-        except Exception: return 0.0
-    rising = sorted(rising, key=_val, reverse=True)[:10]
 
-    themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in rising]
+    themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in rising[:10]]
     st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
 
 data = st.session_state.get("guidance_trends")
 if data:
     st.subheader("Pick a theme to pursue")
-    choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0)
+    choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0, key="guided_theme_pick")
     if st.button("✍️ Draft campaign for this theme"):
         st.session_state["chosen_theme"] = choice
 
-# --- 2) Generate initial variants --------------------------------------------
+# ── 2) Generate initial variants ───────────────────────────────────────
 chosen = st.session_state.get("chosen_theme")
 if chosen:
     st.subheader("Drafting campaign variants…")
@@ -141,46 +127,44 @@ if chosen:
         "reports": "", "stocks_to_tease": "", "quotes_news": "",
         "length_choice": "📐 Medium (200–500 words)"
     }
-    traits = {
-        "Urgency":7, "Data_Richness":6, "Social_Proof":6,
-        "Comparative_Framing":5, "Imagery":6,
-        "Conversational_Tone":7, "FOMO":6, "Repetition":4
-    }
 
-    model_name = None
-    # Prefer nested [openai].api_key, fallback to openai_api_key
-    if hasattr(st, "secrets"):
-        if "openai" in st.secrets and isinstance(st.secrets["openai"], dict):
-            model_name = st.secrets.get("openai", {}).get("model") or st.secrets.get("openai_model") or "gpt-4.1"
-        else:
-            model_name = st.secrets.get("openai_model") or "gpt-4.1"
-    else:
-        model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
+    traits = {
+        "Urgency": 7, "Data_Richness": 6, "Social_Proof": 6,
+        "Comparative_Framing": 5, "Imagery": 6,
+        "Conversational_Tone": 7, "FOMO": 6, "Repetition": 4
+    }
+    trait_cfg = _load_traits_cfg()
 
     variants = gen_copy(
         brief, fmt="sales_page", n=3,
         trait_cfg=trait_cfg, traits=traits,
-        country="Australia", model=model_name
+        country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
     )
+
     texts = [v.copy for v in variants]
     pick = st.radio("Choose a base variant", [f"Variant {i+1}" for i in range(len(texts))], index=0)
     idx = int(pick.split()[-1]) - 1
     base_text = texts[idx]
     st.markdown(base_text)
 
-    # --- 3) Focus-test loop (auto-revise until pass) -------------------------
-    st.subheader("🧪 Focus test & auto‑improve")
-    st.write("Running synthetic focus group on **assets/personas.json** (50 variants).")
+    # ── 3) Focus-test loop (auto-revise until pass) ────────────────────
+    personas_path = pathlib.Path("assets/personas.json")
+    if not personas_path.exists():
+        st.error("Missing assets/personas.json. Commit your persona pack to assets/personas.json.")
+        st.stop()
 
-    if st.button("Run focus test + auto‑improve", type="primary"):
+    personas = load_personas(str(personas_path))
+    threshold = st.slider("Passing mean intent threshold", 6.0, 9.0, 7.5, 0.1)
+    rounds = st.number_input("Max revision rounds", 1, 5, 3)
+
+    if st.button("🧪 Run focus test + auto‑improve"):
         current = base_text
-        passed  = False
+        passed = False
 
-        for r in range(int(max_rounds)):
-            # Wrap text as a small file-like so run_sprint can read it.
-            class _Text(BytesIO):
-                name = "copy.txt"
-            f = _Text(current.encode("utf-8"))
+        for r in range(int(rounds)):
+            # Prepare a fake "file" the sprint engine can read
+            f = BytesIO(current.encode("utf-8"))
+            f.name = "copy.txt"   # sprint_engine.extract_text uses this to guess mime
 
             summary, df, fig, clusters = run_sprint(
                 file_obj=f,
@@ -190,14 +174,7 @@ if chosen:
             )
             mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
 
-            # Render chart (Altair)
-            try:
-                import altair as alt
-                st.altair_chart(fig, use_container_width=True)
-            except Exception:
-                # If someone swaps the engine back to plotly in their local code
-                st.plotly_chart(fig, use_container_width=True)
-
+            st.plotly_chart(fig, use_container_width=True)
             st.write(summary)
             st.write(f"**Round {r+1} mean intent:** {mean_intent:.2f}/10")
 
@@ -206,17 +183,14 @@ if chosen:
                 break
 
             # Build a short feedback brief from cluster summaries to improve copy
-            tips = "\n".join([
-                f"- Cluster {int(row['cluster'])}: {row['summary']}"
-                for _, row in clusters.iterrows()
-            ])
+            tips = "\n".join([f"- Cluster {int(c['cluster'])}: {c['summary']}" for _, c in clusters.iterrows()])
             improve_brief = dict(brief)
             improve_brief["quotes_news"] = f"Persona feedback themes to address:\n{tips}"
 
             improved = gen_copy(
                 improve_brief, fmt="sales_page", n=1,
                 trait_cfg=trait_cfg, traits=traits,
-                country="Australia", model=model_name
+                country="Australia", model=st.secrets.get("openai_model", "gpt-4.1")
             )
             current = improved[0].copy
 
