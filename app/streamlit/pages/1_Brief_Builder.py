@@ -93,6 +93,7 @@ if st.button("🔎 Research topic (Google News via SerpAPI)"):
         results = search_google_news(topic, when=when, num=limit, api_key=key)
         st.session_state["bb_news"] = results
         st.session_state.pop("bb_brief", None)
+        st.session_state.pop("bb_variants", None)
         st.success(f"Fetched {len(results)} sources.")
     except Exception as e:
         st.error(f"News fetch failed: {type(e).__name__}: {e}")
@@ -102,11 +103,35 @@ news = st.session_state.get("bb_news", [])
 if news:
     st.subheader("Sources")
     st.caption("Balanced across publishers, de-duplicated by title.")
-    # Compact table
+
+    # Compact table with excerpt preview if present
     def _compact(n: dict) -> dict:
-        return {"title": n.get("title",""), "publisher": n.get("source",""), "date": n.get("date",""), "url": n.get("link","")}
+        exc = (n.get("excerpt") or n.get("snippet") or "").strip()
+        if len(exc) > 180:
+            exc = exc[:180] + "…"
+        return {
+            "title": n.get("title",""),
+            "publisher": n.get("source",""),
+            "date": n.get("date",""),
+            "url": n.get("link",""),
+            "excerpt_preview": exc,
+        }
     table = [_compact(n) for n in news]
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.dataframe(table, hide_index=True, use_container_width=True)
+
+    # Per-row expanders to read full excerpt/snippet when available
+    with st.expander("Read excerpts", expanded=False):
+        for i, n in enumerate(news, start=1):
+            title = n.get("title","")
+            src = n.get("source","")
+            date = n.get("date","")
+            url = n.get("link","")
+            exc = (n.get("excerpt") or n.get("snippet") or "").strip()
+            if not exc:
+                continue
+            with st.expander(f"{i}. {title}  ·  {src}  ·  {date}"):
+                st.write(exc)
+                st.caption(url)
 
     # Step 2: Optional: fetch article bodies for more context (best-effort)
     with st.expander("Fetch article bodies (optional, slower)", expanded=False):
@@ -115,7 +140,7 @@ if news:
             urls = [n.get("link","") for n in news][:12]
             bodies = fetch_articles_content(urls, limit=12)
             # attach short excerpts back to news entries for LLM context
-            by_url = {b["url"]: b.get("text","") for b in bodies if b.get("url")}
+            by_url = {b.get("url",""): b.get("text","") for b in bodies if b.get("url")}
             enriched = []
             for n in news:
                 t = n.copy()
@@ -296,7 +321,6 @@ if variants:
                 try:
                     st.plotly_chart(fig, width="stretch")
                 except TypeError:
-                    # older Streamlit fallback
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.markdown(summary)
