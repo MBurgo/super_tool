@@ -1,110 +1,125 @@
 # app/streamlit/pages/0_Personas.py
 
-import _bootstrap  # ensures repo root is on sys.path
-import json, tempfile, os
+import _bootstrap  # ensures repo root is on sys.path; keep this first
 from pathlib import Path
+import streamlit as st, json, os, tempfile
 
-import streamlit as st
 from adapters.personas_portal_adapter import load_and_expand
-
-# Try to use utils.store if available; otherwise fallback to plain write
-try:
-    from utils.store import save_json as _save_json_util
-except Exception:
-    _save_json_util = None
+from utils.store import save_json
 
 st.title("Personas")
 st.caption("Load your Personas Portal JSON from the repo or upload, then convert to internal Persona objects.")
 
-DEFAULT_PATH = Path("data/personas.json")
+# ──────────────────────────────────────────────────────────────────────
+# Helpers to locate personas JSON from repo or secrets
+# ──────────────────────────────────────────────────────────────────────
+def _read_repo_personas():
+    """
+    Return (json_text, origin_path|None) if a repo file exists and is non-empty.
+    Search priority: data/personas.json → assets/personas.json → personas.json
+    """
+    for p in [Path("data/personas.json"), Path("assets/personas.json"), Path("personas.json")]:
+        try:
+            if p.exists():
+                txt = p.read_text(encoding="utf-8").strip()
+                if txt and txt not in ("[]", "{}"):
+                    return txt, str(p)
+        except Exception:
+            # ignore unreadable files and keep searching
+            pass
+    return None, None
 
 
-def _load_repo_personas() -> dict | None:
-    """Return parsed JSON from data/personas.json if present and valid."""
-    if not DEFAULT_PATH.exists():
-        return None
+def _read_secrets_personas():
+    """
+    Return (json_text, origin_label|None) if personas are supplied via secrets.
+    Supports either:
+      st.secrets["personas"]["PERSONAS_JSON"]  or
+      st.secrets["PERSONAS_JSON"]
+    Guarded to avoid StreamlitSecretNotFoundError when no secrets exist.
+    """
+    # nested block first
     try:
-        text = DEFAULT_PATH.read_text(encoding="utf-8").strip()
-        if not text or text in ("[]", ""):
-            return None
-        return json.loads(text)
-    except Exception as e:
-        st.warning(f"Found {DEFAULT_PATH} but could not parse JSON: {e}")
-        return None
+        block = st.secrets.get("personas")
+        if isinstance(block, dict) and block.get("PERSONAS_JSON"):
+            return str(block["PERSONAS_JSON"]), "secrets[personas].PERSONAS_JSON"
+    except Exception:
+        pass
+
+    # flat key fallback
+    try:
+        flat = st.secrets.get("PERSONAS_JSON")
+        if flat:
+            return str(flat), "secrets.PERSONAS_JSON"
+    except Exception:
+        pass
+
+    return None, None
 
 
-def _save_personas_list(persona_objs) -> None:
-    """Save expanded personas list to data/personas.json, via utils.store if available."""
-    payload = [p.model_dump() for p in persona_objs]
-    if _save_json_util:
-        # utils.store writes into data/ under the hood
-        _save_json_util("personas.json", payload)
-    else:
-        DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        DEFAULT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-# ---------- Load source ----------
-source_label = None
-data_obj: dict | None = _load_repo_personas()
-if data_obj:
-    source_label = f"Loaded personas from {DEFAULT_PATH}"
-    st.success(source_label)
-
+# ──────────────────────────────────────────────────────────────────────
+# Load order: upload (override) → repo → secrets
+# ──────────────────────────────────────────────────────────────────────
 uploaded = st.file_uploader("Upload personas.json (optional; overrides repo file)", type=["json"])
+
+repo_text, repo_origin = _read_repo_personas()
+sec_text, sec_origin = _read_secrets_personas()
+
+raw_text = None
+source_label = None
+
 if uploaded is not None:
     try:
-        data_obj = json.load(uploaded)
-        source_label = "Loaded personas from uploaded file"
-        st.success(source_label)
+        raw_obj = json.load(uploaded)
+        raw_text = json.dumps(raw_obj, ensure_ascii=False)
+        source_label = f"upload:{uploaded.name}"
+        st.success(f"Loaded personas from uploaded file: {uploaded.name}")
     except Exception as e:
-        st.error(f"Failed to parse uploaded JSON: {e}")
+        st.error(f"Uploaded file isn't valid JSON: {e}")
 
-# ---------- Parse and render ----------
-if data_obj:
+elif repo_text:
+    raw_text = repo_text
+    source_label = repo_origin
+    st.success(f"Loaded personas from {repo_origin}")
+
+elif sec_text:
+    raw_text = sec_text
+    source_label = sec_origin
+    st.success(f"Loaded personas from {sec_origin}")
+
+else:
+    st.info(
+        "No personas loaded yet. Commit a personas.json to **data/personas.json** "
+        "or **assets/personas.json** in the repo, add **PERSONAS_JSON** to secrets, "
+        "or upload a file above."
+    )
+
+# ──────────────────────────────────────────────────────────────────────
+# Parse, convert, preview, and optionally save to /data/personas.json
+# ──────────────────────────────────────────────────────────────────────
+if raw_text:
     try:
-        # Write to a temp path because the adapter expects a file path
-        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tmp:
-            json.dump(data_obj, tmp, ensure_ascii=False, indent=2)
+        # Validate that the text is JSON and write to a temp file so adapter accepts a path
+        _ = json.loads(raw_text)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tmp:
+            tmp.write(raw_text)
             tmp_path = tmp.name
 
-        try:
-            personas = load_and_expand(tmp_path)  # returns List[Persona]
-        finally:
-            # Always clean up temp file
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        personas = load_and_expand(tmp_path)
+        os.unlink(tmp_path)
 
-        st.success(f"Imported {len(personas)} personas.")
-        st.caption(source_label or "Loaded personas")
+        st.success(f"Imported {len(personas)} personas from {source_label}")
 
-        # Preview up to 60
+        # Preview up to 60 to avoid rendering a novel
         for p in personas[:60]:
-            overlays = ", ".join(p.overlays) if getattr(p, "overlays", None) else "base"
+            overlays = ", ".join(getattr(p, "overlays", []) or []) or "base"
             with st.expander(f"{p.name} | {p.segment} | {overlays}"):
                 st.json(p.model_dump(), expanded=False)
 
-        col1, col2 = st.columns(2)
-        if col1.button("💾 Save expanded to /data/personas.json"):
-            try:
-                _save_personas_list(personas)
-                st.success(f"Saved expanded personas to {DEFAULT_PATH}")
-            except Exception as e:
-                st.error(f"Failed to save: {e}")
-
-        if col2.button("🔁 Reset (clear cache)"):
-            try:
-                st.cache_data.clear()
-            except Exception:
-                pass
-            st.rerun()
+        if st.button("Save to repo as data/personas.json"):
+            save_json("personas.json", [p.model_dump() for p in personas])
+            st.success("Saved to data/personas.json")
 
     except Exception as e:
-        st.error(f"Failed to convert personas: {e}")
-else:
-    st.info(
-        f"No personas loaded yet. Commit a personas.json to **{DEFAULT_PATH}** in the repo "
-        f"or upload a file above."
-    )
+        st.error(f"Failed to parse or load personas: {e}")
