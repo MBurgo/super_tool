@@ -1,5 +1,6 @@
-# app/streamlit/pages/0_Guided_flow.py
+# app/streamlit/pages/0_Guided_Flow.py
 import _bootstrap
+import os
 import json
 from io import BytesIO
 from pathlib import Path
@@ -7,117 +8,125 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 
-# ── External adapters (SERP-based trend finder, copywriter) ───────────
-from adapters.trends_serp_adapter import fetch_trends_and_news
+# Robust SerpAPI + meta fetch
+from adapters.trends_serp_adapter import (
+    fetch_trends_and_news,
+    fetch_meta_descriptions,
+    get_serp_api_key,
+)
+
+# Copywriter + focus group
 from adapters.copywriter_mf_adapter import generate as gen_copy
 
-# ── Sprint engine (try packaged path first, then flat fallback) ────────
+# sprint_engine / tmf_synth_utils can live under core/ or project root; import defensively
 try:
     from core.sprint_engine import run_sprint
 except Exception:
-    from sprint_engine import run_sprint  # flat layout fallback
+    from sprint_engine import run_sprint
 
-# ───────────────────────────────────────────────────────────────────────
-# Helpers (local loaders, robust secrets discovery)
-# ───────────────────────────────────────────────────────────────────────
-def _find_serp_key() -> str | None:
-    # Try Streamlit secrets (nested and flat) then environment
-    try:
-        if "serpapi" in st.secrets and "api_key" in st.secrets["serpapi"]:
-            return st.secrets["serpapi"]["api_key"]
-    except Exception:
-        pass
-    try:
-        if "SERPAPI_API_KEY" in st.secrets:
-            return st.secrets["SERPAPI_API_KEY"]
-        if "SERP_API_KEY" in st.secrets:
-            return st.secrets["SERP_API_KEY"]
-    except Exception:
-        pass
-
-    import os
-    return os.environ.get("SERPAPI_API_KEY") or os.environ.get("SERP_API_KEY")
+try:
+    from core.tmf_synth_utils import load_personas
+except Exception:
+    from tmf_synth_utils import load_personas
 
 
-def _load_personas_from_repo() -> list[dict]:
-    """
-    Looks for personas.json in the repo so the page doesn't require uploads.
-    Priority:
-      1) assets/personas.json
-      2) data/personas.json
-      3) personas.json (repo root)
-    """
-    candidates = [
-        Path("assets/personas.json"),
-        Path("data/personas.json"),
-        Path("personas.json"),
-    ]
-    for p in candidates:
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            return data.get("personas") or data  # support both shapes
-    raise FileNotFoundError(
-        "No personas.json found. Commit one of: "
-        "assets/personas.json, data/personas.json, or repo-root personas.json."
-    )
-
-
-def _load_traits_cfg() -> dict:
-    """
-    Reads traits_config.json with failover so we’re resilient to where you keep it.
-    Priority:
-      1) assets/traits_config.json
-      2) traits_config.json (repo root)
-    """
-    for p in [Path("assets/traits_config.json"), Path("traits_config.json")]:
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
-    raise FileNotFoundError(
-        "Missing traits config. Commit assets/traits_config.json "
-        "or traits_config.json at the repo root."
-    )
-
-
-# ───────────────────────────────────────────────────────────────────────
-# Page UI
-# ───────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Guided Flow", page_icon="🧭")
 st.title("🧭 Guided Campaign Builder (No Sheets)")
 
+# ────────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────────
+def load_json_safely(path_candidates):
+    for p in path_candidates:
+        p = Path(p)
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    return None
+
+def load_trait_cfg():
+    data = load_json_safely(["assets/traits_config.json", "traits_config.json"])
+    if not data:
+        # Minimal safe defaults if file missing
+        return {
+            "Urgency": {"high_threshold": 8, "low_threshold": 3,
+                        "high_rule": "- Include an explicit deadline in headline and CTA.",
+                        "mid_rule": "- Refer to timing once, no countdowns.",
+                        "low_rule": "- Avoid urgency and scarcity."},
+            "Data_Richness": {"high_threshold": 7, "low_threshold": 3,
+                              "high_rule": "- Cite at least one numeric figure.",
+                              "mid_rule": "- One light data point allowed.",
+                              "low_rule": "- Avoid stats and percentages."},
+        }
+    return data
+
+def load_personas_from_repo():
+    # Uses your committed file (recommended to avoid secrets headaches)
+    # You already committed assets/personas.json earlier.
+    return load_personas("assets/personas.json")
+
+
+# ────────────────────────────────────────────────────────────────────
+# Non-sensitive key diagnostics (does not print secrets)
+# ────────────────────────────────────────────────────────────────────
+def has_serp_key_in_secrets() -> bool:
+    try:
+        sec = getattr(st, "secrets", None)
+        if not sec:
+            return False
+        if "serpapi" in sec and isinstance(sec["serpapi"], dict):
+            return bool(sec["serpapi"].get("api_key") or sec["serpapi"].get("API_KEY") or sec["serpapi"].get("key"))
+        # flat key variants
+        return any(k in sec for k in ("SERPAPI_API_KEY", "SERP_API_KEY", "serpapi_api_key", "serp_api_key"))
+    except Exception:
+        return False
+
+def has_serp_key_in_env() -> bool:
+    return bool(os.environ.get("SERPAPI_API_KEY") or os.environ.get("SERP_API_KEY"))
+
+with st.expander("⚙️ Debug (safe)"):
+    s_ok = has_serp_key_in_secrets()
+    e_ok = has_serp_key_in_env()
+    st.markdown(
+        f"SerpAPI in **secrets**: "
+        f"{'✅ found' if s_ok else '⬜ not found'} &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"SerpAPI in **env**: {'✅ found' if e_ok else '⬜ not found'}"
+    )
+
+# ────────────────────────────────────────────────────────────────────
 # 1) Kick off trend finder
-if st.button("🔎 Find live trends & news", type="primary"):
-    serp_key = _find_serp_key()
-    if not serp_key:
-        st.error(
-            "SerpAPI key not found. Add to Streamlit secrets as "
-            '`[serpapi]\napi_key="..."` or set the SERPAPI_API_KEY env var.'
-        )
-    else:
+# ────────────────────────────────────────────────────────────────────
+if st.button("🔎 Find live trends & news"):
+    try:
+        serp_key = get_serp_api_key()  # robust resolver (secrets or env)
         rising, news = fetch_trends_and_news(serp_key)
-        # Keep a compact list of themes (top 10 rising queries)
+        # Fetch meta descriptions for better summaries
+        urls = [n.get("link") for n in news if n.get("link")]
+        metas = asyncio.run(fetch_meta_descriptions(urls)) if urls else []
+        for n, m in zip(news, metas):
+            n["fetched_meta"] = m
+
         themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
-        st.session_state["guidance_trends"] = {"rising": rising or [], "news": news or [], "themes": themes}
+        st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
+        st.success("Fetched fresh rising queries & news.")
+    except Exception as e:
+        st.error(str(e))
 
 data = st.session_state.get("guidance_trends")
 if data:
     st.subheader("Pick a theme to pursue")
-    if not data["themes"]:
-        st.warning("No rising queries returned. Try again in a moment.")
-    else:
-        choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0)
-        if st.button("✍️ Draft campaign for this theme"):
-            st.session_state["chosen_theme"] = choice
+    choice = st.radio("Top Rising Queries (last 4h AU)", data["themes"], index=0)
+    if st.button("✍️ Draft campaign for this theme"):
+        st.session_state["chosen_theme"] = choice
 
-# 2) Generate initial variants for chosen theme
+# ────────────────────────────────────────────────────────────────────
+# 2) Generate initial variants
+# ────────────────────────────────────────────────────────────────────
 chosen = st.session_state.get("chosen_theme")
 if chosen:
     st.subheader("Drafting campaign variants…")
-
-    try:
-        trait_cfg = _load_traits_cfg()
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
 
     brief = {
         "id": "guided",
@@ -125,41 +134,32 @@ if chosen:
         "details": "Campaign based on live AU rising queries + latest news.",
         "offer_price": "", "retail_price": "", "offer_term": "",
         "reports": "", "stocks_to_tease": "", "quotes_news": "",
-        "length_choice": "📐 Medium (200–500 words)",
+        "length_choice": "📐 Medium (200–500 words)"
     }
-    traits = {"Urgency": 7, "Data_Richness": 6, "Social_Proof": 6,
-              "Comparative_Framing": 5, "Imagery": 6,
-              "Conversational_Tone": 7, "FOMO": 6, "Repetition": 4}
+    traits_cfg = load_trait_cfg()
+    traits = {"Urgency":7, "Data_Richness":6, "Social_Proof":6,
+              "Comparative_Framing":5, "Imagery":6,
+              "Conversational_Tone":7, "FOMO":6, "Repetition":4}
 
-    # Generate 3 variants via the copywriter adapter
+    # model name pulled from secrets or default
+    model_name = st.secrets.get("openai_model", "gpt-4.1") if hasattr(st, "secrets") else "gpt-4.1"
+
     variants = gen_copy(
         brief, fmt="sales_page", n=3,
-        trait_cfg=trait_cfg, traits=traits,
-        country="Australia",
-        model=st.secrets.get("openai_model", "gpt-4.1")
+        trait_cfg=traits_cfg, traits=traits,
+        country="Australia", model=model_name
     )
+    texts = [v.copy for v in variants]
 
-    texts = [v.copy for v in variants] if variants else []
-    if not texts:
-        st.error("The copywriter returned no variants. Check your OpenAI key and model.")
-        st.stop()
-
-    pick = st.radio(
-        "Choose a base variant",
-        [f"Variant {i+1}" for i in range(len(texts))],
-        index=0
-    )
+    pick = st.radio("Choose a base variant", [f"Variant {i+1}" for i in range(len(texts))], index=0)
     idx = int(pick.split()[-1]) - 1
     base_text = texts[idx]
     st.markdown(base_text)
 
+    # ────────────────────────────────────────────────────────────────
     # 3) Focus-test loop (auto-revise until pass)
-    try:
-        personas = _load_personas_from_repo()
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
-
+    # ────────────────────────────────────────────────────────────────
+    personas = load_personas_from_repo()
     threshold = st.slider("Passing mean intent threshold", 6.0, 9.0, 7.5, 0.1)
     rounds = st.number_input("Max revision rounds", 1, 5, 3)
 
@@ -168,18 +168,14 @@ if chosen:
         passed = False
 
         for r in range(int(rounds)):
-            # Wrap current copy as a file-like object for sprint_engine
+            # wrap text as a file-like for run_sprint
             f = BytesIO(current.encode("utf-8"))
-            f.name = "copy.txt"  # sprint_engine.extract_text expects a .name
+            f.name = "copy.txt"
 
             summary, df, fig, clusters = run_sprint(
-                file_obj=f,
-                segment="All Segments",
-                persona_groups=personas,
-                return_cluster_df=True,
+                file_obj=f, segment="All Segments", persona_groups=personas, return_cluster_df=True
             )
-
-            mean_intent = float(np.mean(df["intent"])) if (df is not None and not df.empty) else 0.0
+            mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
             st.plotly_chart(fig, use_container_width=True)
             st.write(summary)
             st.write(f"**Round {r+1} mean intent:** {mean_intent:.2f}/10")
@@ -188,28 +184,17 @@ if chosen:
                 passed = True
                 break
 
-            # Build short feedback brief from cluster summaries to improve copy
-            if clusters is not None and not clusters.empty:
-                tips = "\n".join(
-                    [f"- Cluster {int(row['cluster'])}: {row['summary']}" for _, row in clusters.iterrows()]
-                )
-            else:
-                tips = "- (No cluster summaries available; improve clarity and benefits emphasis.)"
-
+            # Build a short feedback brief from cluster summaries to improve copy
+            tips = "\n".join([f"- Cluster {int(c['cluster'])}: {c['summary']}" for _, c in clusters.iterrows()])
             improve_brief = dict(brief)
             improve_brief["quotes_news"] = f"Persona feedback themes to address:\n{tips}"
 
             improved = gen_copy(
                 improve_brief, fmt="sales_page", n=1,
-                trait_cfg=trait_cfg, traits=traits,
-                country="Australia",
-                model=st.secrets.get("openai_model", "gpt-4.1")
+                trait_cfg=traits_cfg, traits=traits,
+                country="Australia", model=model_name
             )
-            if improved:
-                current = improved[0].copy
-            else:
-                st.warning("Improver returned no text—continuing with last best draft.")
-                break
+            current = improved[0].copy
 
         st.subheader("✅ Finalised Campaign" if passed else "⚠️ Best Attempt (threshold not reached)")
         st.markdown(current)
