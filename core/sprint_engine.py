@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 from sklearn.cluster import KMeans
 
-from core.tmf_synth_utils import call_gpt_json, embed_texts
+from core.synth_utils import call_gpt_json, embed_texts  # <- your repo's module
 
 def extract_text(file_obj: io.BytesIO | io.StringIO) -> str:
     if hasattr(file_obj, "read"):
@@ -40,17 +40,16 @@ def get_50_personas(segment: str, persona_groups: Iterable[Dict[str, Any]]) -> L
     out: List[Dict[str, Any]] = []
     while len(out) < 50:
         p = random.choice(base).copy()
-        # Tweak a trait slightly to create a "variant"
         p["name"] = f"{p.get('name','Persona')} v{random.randint(1,9)}"
         out.append(p)
     return out[:50]
 
-def json_dumps_trim(obj: Any, max_chars: int = 1000) -> str:
+def _json_dumps_trim(obj: Any, max_chars: int = 1000) -> str:
     import json as _json
     s = _json.dumps(obj, ensure_ascii=False)
     return s if len(s) <= max_chars else s[:max_chars] + "…"
 
-def safe_json(text: str) -> Any:
+def _safe_json(text: str) -> Any:
     import json
     try:
         return json.loads(text)
@@ -63,7 +62,7 @@ def get_reaction(persona: Dict[str, Any], creative_txt: str) -> Tuple[str, float
         "role": "user",
         "content": (
             "Persona (JSON):\n"
-            + json_dumps_trim(persona) + "\n\n"
+            + _json_dumps_trim(persona) + "\n\n"
             "Creative to evaluate:\n"
             + creative_txt[:6000] + "\n\n"
             "Return JSON: {\n"
@@ -74,7 +73,7 @@ def get_reaction(persona: Dict[str, Any], creative_txt: str) -> Tuple[str, float
     }
     raw = call_gpt_json([{"role": "system", "content": sys}, prompt], model="gpt-4o-mini")
     try:
-        data = safe_json(raw)
+        data = _safe_json(raw)
         fb = str(data.get("feedback") or "").strip()
         sc = float(data.get("intent") or 0.0)
         sc = float(np.clip(sc, 0, 10))
@@ -92,7 +91,6 @@ def cluster_responses(feedbacks: List[str]) -> List[int]:
     return labels.tolist()
 
 def label_clusters(feedbacks: List[str], labels: List[int]) -> Dict[int, str]:
-    # Simple heuristic: take first sentence of the median-length feedback in each cluster
     import re
     by_c: Dict[int, List[str]] = {}
     for fb, lb in zip(feedbacks, labels):
@@ -112,7 +110,7 @@ def run_sprint(
     persona_groups: Iterable[Dict[str, Any]],
     progress_cb=None,
     return_cluster_df: bool = True,
-) -> Tuple[str, pd.DataFrame, "px.Figure", Dict[int, float]]:
+):
     creative_txt = extract_text(file_obj)
     personas = get_50_personas(segment, persona_groups)
     if not creative_txt.strip() or not personas:
@@ -136,8 +134,7 @@ def run_sprint(
     labels = cluster_responses(feedbacks)
     summaries = label_clusters(feedbacks, labels)
 
-    import pandas as _pd  # avoid potential name shadowing
-    df = _pd.DataFrame(
+    df = pd.DataFrame(
         {
             "persona": [p.get("name","Persona") for p in personas],
             "cluster": labels,
@@ -149,7 +146,7 @@ def run_sprint(
     cluster_means: Dict[int, float] = (
         df.groupby("cluster")["intent"].mean().round(2).to_dict() if not df.empty else {}
     )
-    cm_df = _pd.DataFrame(
+    cm_df = pd.DataFrame(
         {"cluster": list(cluster_means.keys()), "mean_intent": list(cluster_means.values())}
     ).sort_values("mean_intent", ascending=False)
 
