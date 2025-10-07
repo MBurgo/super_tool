@@ -2,12 +2,12 @@
 # Compose a publisher-grade campaign brief from news items.
 # Produces a structured JSON brief and a Markdown export.
 
-from typing import List, Dict, Any, Tuple
+from __future__ import annotations
+from typing import List, Dict, Any
 from textwrap import dedent
 import json
 
 from core.synth_utils import call_gpt_json
-
 
 SCHEMA_EXAMPLE = {
     "summary": "one-paragraph market summary for AU retail investors",
@@ -29,7 +29,6 @@ SCHEMA_EXAMPLE = {
     ]
 }
 
-
 def _news_items_to_prompt(news: List[Dict[str, Any]], max_items: int = 18) -> str:
     lines: List[str] = []
     for i, n in enumerate(news[:max_items], start=1):
@@ -37,10 +36,12 @@ def _news_items_to_prompt(news: List[Dict[str, Any]], max_items: int = 18) -> st
         src = n.get("source", "")
         date = n.get("date", "")
         link = n.get("link", "")
-        snippet = n.get("snippet", "")
-        lines.append(f"{i}. {title} — {src} — {date}\n   {snippet}\n   {link}")
+        # Prefer excerpt if we fetched bodies; else snippet
+        excerpt = (n.get("excerpt") or n.get("snippet") or "").strip()
+        if excerpt:
+            excerpt = excerpt[:800]
+        lines.append(f"{i}. {title} — {src} — {date}\n   {excerpt}\n   {link}")
     return "\n".join(lines)
-
 
 def build_campaign_brief(
     topic: str,
@@ -66,7 +67,7 @@ def build_campaign_brief(
     user = dedent(f"""
     Topic: {topic}
 
-    Source headlines (title — publisher — date, then snippet and URL):
+    Source material (title — publisher — date, then excerpt/snippet and URL):
     { _news_items_to_prompt(news, max_items=18) }
 
     Tasks:
@@ -89,11 +90,9 @@ def build_campaign_brief(
     try:
         data = json.loads(raw)
     except Exception:
-        # Attempt to salvage JSON if model added stray prose
         start = raw.find("{"); end = raw.rfind("}")
         data = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {}
 
-    # Defensive shaping
     out = {k: data.get(k) for k in SCHEMA_EXAMPLE.keys()}
     for key, val in out.items():
         if isinstance(val, list):
@@ -103,7 +102,6 @@ def build_campaign_brief(
     if not isinstance(out.get("citations"), list):
         out["citations"] = []
     return out
-
 
 def brief_to_markdown(topic: str, brief: Dict[str, Any]) -> str:
     def section(title: str, body: str) -> str:
