@@ -1,26 +1,62 @@
 # app/streamlit/pages/0_Guided_flow.py
 import _bootstrap  # ensures project root is on sys.path
-import os
+import sys
+import importlib
 from io import BytesIO
 from pathlib import Path
 import json
 import numpy as np
 import streamlit as st
 
-import adapters.trends_serp_adapter as serp_adapter
-from adapters.trends_serp_adapter import (
-    get_serpapi_key,
-    serp_key_diagnostics,
-    fetch_trends_and_news,
-    enrich_news_with_meta,
-)
-
-from adapters.copywriter_mf_adapter import generate as gen_copy
-from core.sprint_engine import run_sprint
-
 st.set_page_config(page_title="Guided Flow", page_icon="🧭", layout="wide")
 st.title("Guided Flow: Trends → Variants → Synthetic Focus → Finalise")
-st.caption("Live AU finance trends, draft copy, iterate with synthetic personas until intent target is met.")
+st.caption("Live AU finance trends, draft copy, iterate with synthetic personas until the intent target is met.")
+
+# ---- Show runtime quickly so we stop guessing versions ----
+with st.expander("Runtime info", expanded=False):
+    st.write({"python_version": sys.version, "sys_path_head": sys.path[:3]})
+
+# ---- Lazy import adapters with guardrails so we can SEE errors ----
+def load_adapter(module_name: str):
+    try:
+        mod = importlib.import_module(module_name)
+        return mod, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+serp_adapter, serp_err = load_adapter("adapters.trends_serp_adapter")
+if serp_err:
+    st.error("Failed to import adapters.trends_serp_adapter")
+    st.code(serp_err)
+    st.stop()
+
+copy_adapter, copy_err = load_adapter("adapters.copywriter_mf_adapter")
+if copy_err:
+    st.error("Failed to import adapters.copywriter_mf_adapter")
+    st.code(copy_err)
+    st.stop()
+
+sprint_engine, sprint_err = load_adapter("core.sprint_engine")
+if sprint_err:
+    st.error("Failed to import core.sprint_engine")
+    st.code(sprint_err)
+    st.stop()
+
+# Bind functions safely
+get_serpapi_key = getattr(serp_adapter, "get_serpapi_key", None)
+serp_key_diagnostics = getattr(serp_adapter, "serp_key_diagnostics", None)
+fetch_trends_and_news = getattr(serp_adapter, "fetch_trends_and_news", None)
+enrich_news_with_meta = getattr(serp_adapter, "enrich_news_with_meta", None)
+gen_copy = getattr(copy_adapter, "generate", None)
+run_sprint = getattr(sprint_engine, "run_sprint", None)
+
+with st.expander("Import diagnostics", expanded=False):
+    st.write({
+        "adapter_module_path": getattr(serp_adapter, "__file__", "n/a"),
+        "adapter_version": getattr(serp_adapter, "ADAPTER_VERSION", "n/a"),
+        "copywriter_module_path": getattr(copy_adapter, "__file__", "n/a"),
+        "sprint_module_path": getattr(sprint_engine, "__file__", "n/a"),
+    })
 
 # ---- Locate required assets ----
 assets_dir = Path("assets")
@@ -54,15 +90,18 @@ except Exception as e:
     st.warning(f"Traits config read issue: {e}")
 
 # Helper to recompute key each render
-def _current_serp_key() -> str | None:
-    k = get_serpapi_key()
-    st.session_state["serpapi_key_present"] = bool(k and k.strip())
+def _current_serp_key():
+    try:
+        k = get_serpapi_key() if callable(get_serpapi_key) else None
+    except Exception as e:
+        st.warning(f"get_serpapi_key raised: {type(e).__name__}: {e}")
+        k = None
+    st.session_state["serpapi_key_present"] = bool(k and str(k).strip())
     return k
 
 with st.expander("Live Trends & News", expanded=True):
     st.caption("Uses SerpAPI: Google Trends (rising related queries) and Google News for AU within your chosen window.")
 
-    # Always recompute, no stale caching
     serp_key = _current_serp_key()
 
     colA, colB = st.columns([1, 1])
@@ -75,27 +114,18 @@ with st.expander("Live Trends & News", expanded=True):
             except Exception:
                 st.experimental_rerun()
 
-    # Visible, non-leaky diagnostics so you can prove what's loading
-    diag = serp_key_diagnostics()
+    # Non-leaky diagnostics: value lengths only
+    diag = {}
+    try:
+        diag = serp_key_diagnostics() if callable(serp_key_diagnostics) else {}
+    except Exception as e:
+        diag = {"error": f"{type(e).__name__}: {e}"}
     st.markdown("**Key detection diagnostic (never shows values):**")
-    st.code(
-        json.dumps(
-            {
-                "adapter_version": diag.get("adapter_version"),
-                "module_path": diag.get("module_path"),
-                "env_value_lengths": diag.get("env_value_lengths"),
-                "secrets_value_lengths": diag.get("secrets_value_lengths"),
-            },
-            indent=2,
-        ),
-        language="json",
-    )
-    st.caption("If `[serpapi].api_key` length > 0 here, the app can read your key from Streamlit Secrets.")
+    st.code(json.dumps(diag, indent=2), language="json")
 
     query = st.text_input("Search theme for news & trends", "asx 200")
     news_when = st.selectbox("Time window for news", ["4h", "1d", "7d"], index=0)
 
-    # Allow running even if the status line says no key; the fetch will re-check and error clearly if missing
     if st.button("🔎 Find live trends & news"):
         try:
             rising, news = fetch_trends_and_news(serp_key, query=query, news_when=news_when)
@@ -103,7 +133,7 @@ with st.expander("Live Trends & News", expanded=True):
             themes = [f"{r.get('query','(n/a)')} — {r.get('value','')}" for r in (rising or [])[:10]]
             st.session_state["guidance_trends"] = {"rising": rising, "news": news, "themes": themes}
         except Exception as e:
-            st.error(f"Trend fetch failed: {e}")
+            st.error(f"Trend fetch failed: {type(e).__name__}: {e}")
             st.stop()
 
 data = st.session_state.get("guidance_trends")
@@ -121,8 +151,8 @@ if data:
 
 chosen = st.session_state.get("chosen_theme")
 if chosen and traits_path and personas_path:
-    # ---- 2) Generate initial variants ----
     st.subheader("Drafting campaign variants…")
+
     brief = {
         "id": "guided",
         "theme": chosen,
@@ -176,7 +206,6 @@ if chosen and traits_path and personas_path:
         base_text = base.copy
         st.markdown(base_text)
 
-        # ---- 3) Focus-test loop (auto revise until pass) ----
         personas = json.loads(personas_path.read_text(encoding="utf-8")).get("personas", [])
 
         threshold = st.slider("Passing mean intent threshold", 6.0, 9.5, 7.5, 0.1)
