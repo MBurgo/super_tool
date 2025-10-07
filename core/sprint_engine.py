@@ -1,159 +1,132 @@
 # core/sprint_engine.py
 from __future__ import annotations
 
-import copy
 import io
-import mimetypes
 import random
-from pathlib import Path
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Iterable
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 from sklearn.cluster import KMeans
 
-from core.tmf_synth_utils import call_gpt, embed_texts
+from core.tmf_synth_utils import call_gpt_json, embed_texts
 
-# Optional libs (DOCX & PDF)
-try:
-    import docx
-except ImportError:
-    docx = None
-try:
-    import PyPDF2
-except ImportError:
-    PyPDF2 = None
+def extract_text(file_obj: io.BytesIO | io.StringIO) -> str:
+    if hasattr(file_obj, "read"):
+        try:
+            data = file_obj.read()
+            if isinstance(data, bytes):
+                return data.decode("utf-8", errors="ignore")
+            return str(data)
+        except Exception:
+            pass
+    return ""
 
-SEG_ALL = "All Segments"
-SYSTEM_MSG = "You are simulating an investor responding in a conversational, candid tone."
+def _pick_k(n: int) -> int:
+    if n < 12:
+        return 2
+    if n < 24:
+        return 3
+    if n < 48:
+        return 4
+    return 5
 
-REACTION_TEMPLATE = """You are {name}, a {age}-year-old {occupation} from {location}.
-Below is a marketing creative you can read. Give your honest reaction in 2 short paragraphs, then
-score your likelihood of taking the CTA from 0–10 on its own line in the form:
-INTENT_SCORE: <number>
-
-CREATIVE:
----------
-{creative}
----------
-"""
-
-# ───────────────── Persona helpers ───────────────── #
-def mutate_persona(seed, idx):
-    p = copy.deepcopy(seed)
-    first = p["name"].split()[0]
-    p["name"] = f"{first} Variant {idx+1}"
-    p["age"] = random.randint(max(18, seed["age"] - 5), seed["age"] + 5)
-    p["income"] = int(seed.get("income", 80000) * random.uniform(0.7, 1.3))
-    # Normalise a few keys that the template expects
-    p.setdefault("occupation", "Investor")
-    p.setdefault("location", p.get("location", "Australia"))
-    return p
-
-
-def get_50_personas(segment, persona_groups):
-    seeds = persona_groups if segment == SEG_ALL else [
-        g for g in persona_groups if g.get("segment") == segment
-    ]
-    base = []
-    for grp in seeds:
-        for gender in ("male", "female"):
-            if grp.get(gender):
-                base.append(grp[gender])
-    out = []
-    i = 0
-    while len(out) < 50 and base:
-        out.append(mutate_persona(random.choice(base), i))
-        i += 1
+def get_50_personas(segment: str, persona_groups: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    base = list(persona_groups or [])
+    if not base:
+        return []
+    # Sample with replacement to 50
+    out: List[Dict[str, Any]] = []
+    while len(out) < 50:
+        p = random.choice(base).copy()
+        # Tweak a trait slightly to create a "variant"
+        p["name"] = f"{p.get('name','Persona')} v{random.randint(1,9)}"
+        out.append(p)
     return out[:50]
 
-# ───────────────── Creative extraction ───────────────── #
-def _extract_pdf_text(file_obj) -> str:
-    if PyPDF2 is None:
-        return "[PDF uploaded, but PyPDF2 not installed.]"
-    reader = PyPDF2.PdfReader(io.BytesIO(file_obj.read()))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+def json_dumps_trim(obj: Any, max_chars: int = 1000) -> str:
+    import json as _json
+    s = _json.dumps(obj, ensure_ascii=False)
+    return s if len(s) <= max_chars else s[:max_chars] + "…"
 
-
-def _extract_docx_text(file_obj) -> str:
-    if docx is None:
-        return "[DOC/DOCX uploaded, but python-docx not installed.]"
-    d = docx.Document(io.BytesIO(file_obj.read()))
-    return "\n".join(p.text for p in d.paragraphs)
-
-
-def extract_text(file_obj) -> str:
-    fname = Path(getattr(file_obj, "name", "upload")).name.lower()
-    mime, _ = mimetypes.guess_type(fname)
-
-    if mime and mime.startswith("text"):
-        return file_obj.read().decode("utf-8", errors="ignore")
-    if fname.endswith((".doc", ".docx")):
-        return _extract_docx_text(file_obj)
-    if fname.endswith(".pdf"):
-        return _extract_pdf_text(file_obj)
+def safe_json(text: str) -> Any:
+    import json
     try:
-        return file_obj.read().decode("utf-8", errors="ignore")
+        return json.loads(text)
     except Exception:
-        return "[Unsupported file format. Please upload txt, html, md, doc, docx, or pdf.]"
+        return {}
 
-# ───────────────── LLM pipeline ───────────────── #
-def get_reaction(persona, creative_txt: str) -> Tuple[str, float]:
-    prompt = REACTION_TEMPLATE.format(**persona, creative=creative_txt)
-    msgs = [
-        {"role": "system", "content": SYSTEM_MSG},
-        {"role": "user", "content": prompt},
-    ]
-    text = call_gpt(msgs)
-    if "INTENT_SCORE" in text:
-        feedback, score_line = text.rsplit("INTENT_SCORE:", 1)
-        try:
-            score = float(score_line.strip())
-        except ValueError:
-            score = 0.0
-    else:
-        feedback, score = text, 0.0
-    return feedback.strip(), score
-
-
-def cluster_responses(feedbacks: List[str], k: int = 5) -> np.ndarray:
-    vecs = embed_texts(feedbacks)
-    km = KMeans(n_clusters=k, n_init="auto").fit(vecs)
-    return km.labels_
-
-
-def label_clusters(feedbacks: List[str], labels: np.ndarray) -> Dict[int, str]:
-    summaries = {}
-    for lab in sorted(set(labels)):
-        snippets = [t for t, l in zip(feedbacks, labels) if l == lab][:10]
-        prompt = (
-            "Summarise the common theme in these snippets:\n"
-            + "\n---\n".join(snippets)
+def get_reaction(persona: Dict[str, Any], creative_txt: str) -> Tuple[str, float]:
+    sys = "You are this persona evaluating a marketing message. Be candid, specific, and concise. Output JSON."
+    prompt = {
+        "role": "user",
+        "content": (
+            "Persona (JSON):\n"
+            + json_dumps_trim(persona) + "\n\n"
+            "Creative to evaluate:\n"
+            + creative_txt[:6000] + "\n\n"
+            "Return JSON: {\n"
+            '  "feedback": "one paragraph of qualitative feedback",\n'
+            '  "intent": number 0-10\n'
+            "}"
         )
-        summaries[lab] = call_gpt([{"role": "user", "content": prompt}]) or "Theme not available"
+    }
+    raw = call_gpt_json([{"role": "system", "content": sys}, prompt], model="gpt-4o-mini")
+    try:
+        data = safe_json(raw)
+        fb = str(data.get("feedback") or "").strip()
+        sc = float(data.get("intent") or 0.0)
+        sc = float(np.clip(sc, 0, 10))
+        return fb or "No feedback", sc
+    except Exception:
+        return "No feedback", 0.0
+
+def cluster_responses(feedbacks: List[str]) -> List[int]:
+    if not feedbacks:
+        return []
+    embs = embed_texts(feedbacks, model="text-embedding-3-small")
+    k = _pick_k(len(feedbacks))
+    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+    labels = km.fit_predict(embs)
+    return labels.tolist()
+
+def label_clusters(feedbacks: List[str], labels: List[int]) -> Dict[int, str]:
+    # Simple heuristic: take first sentence of the median-length feedback in each cluster
+    import re
+    by_c: Dict[int, List[str]] = {}
+    for fb, lb in zip(feedbacks, labels):
+        by_c.setdefault(lb, []).append(fb)
+    summaries: Dict[int, str] = {}
+    for c, items in by_c.items():
+        items_sorted = sorted(items, key=lambda s: len(s))
+        mid = items_sorted[len(items_sorted)//2]
+        sent = re.split(r"[.!?]\s+", mid.strip())[0]
+        summaries[c] = sent[:160]
     return summaries
 
-# ───────────────── Public API ───────────────── #
 def run_sprint(
-    file_obj,
-    segment: str,
-    persona_groups: List[Dict[str, Any]],
     *,
-    return_cluster_df: bool = False,
-    progress_cb=None,  # optional Streamlit progress object
-):
+    file_obj: io.BytesIO | io.StringIO,
+    segment: str,
+    persona_groups: Iterable[Dict[str, Any]],
+    progress_cb=None,
+    return_cluster_df: bool = True,
+) -> Tuple[str, pd.DataFrame, "px.Figure", Dict[int, float]]:
     creative_txt = extract_text(file_obj)
     personas = get_50_personas(segment, persona_groups)
+    if not creative_txt.strip() or not personas:
+        df = pd.DataFrame(columns=["persona", "cluster", "intent", "feedback"])
+        fig = px.bar(x=[], y=[], title="Mean Intent by Cluster")
+        return "No input or personas.", df, fig, {}
 
-    feedbacks, scores = [], []
+    feedbacks: List[str] = []
+    scores: List[float] = []
     total = len(personas)
-
     for idx, p in enumerate(personas, start=1):
         fb, sc = get_reaction(p, creative_txt)
         feedbacks.append(fb)
         scores.append(sc)
-
         if progress_cb is not None:
             try:
                 progress_cb.progress(idx / total, text=f"{idx}/{total} personas")
@@ -163,34 +136,24 @@ def run_sprint(
     labels = cluster_responses(feedbacks)
     summaries = label_clusters(feedbacks, labels)
 
-    df = pd.DataFrame(
+    import pandas as _pd  # avoid potential name shadowing
+    df = _pd.DataFrame(
         {
-            "persona": [p["name"] for p in personas],
+            "persona": [p.get("name","Persona") for p in personas],
             "cluster": labels,
             "intent": scores,
             "feedback": feedbacks,
         }
     )
 
-    cluster_means = (
-        df.groupby("cluster")["intent"].mean()
-        .rename("mean_intent")
-        .reset_index()
-        .merge(
-            pd.DataFrame(
-                {"cluster": list(summaries.keys()), "summary": list(summaries.values())}
-            ),
-            on="cluster",
-        )
+    cluster_means: Dict[int, float] = (
+        df.groupby("cluster")["intent"].mean().round(2).to_dict() if not df.empty else {}
     )
+    cm_df = _pd.DataFrame(
+        {"cluster": list(cluster_means.keys()), "mean_intent": list(cluster_means.values())}
+    ).sort_values("mean_intent", ascending=False)
 
-    fig = px.bar(
-        cluster_means,
-        x="cluster",
-        y="mean_intent",
-        text="mean_intent",
-        title="Mean Intent by Cluster",
-    )
+    fig = px.bar(cm_df, x="cluster", y="mean_intent", text="mean_intent", title="Mean Intent by Cluster")
     fig.update_layout(yaxis_title="Intent 0–10")
 
     summary = f"**Overall mean intent:** {np.mean(scores):.1f}/10\n\n**Key clusters:**\n"
@@ -199,4 +162,4 @@ def run_sprint(
 
     if return_cluster_df:
         return summary, df, fig, cluster_means
-    return summary, df, fig
+    return summary, df, fig, cluster_means
