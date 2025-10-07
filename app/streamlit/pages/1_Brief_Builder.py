@@ -32,6 +32,9 @@ if err3:
 sprint_engine, err4 = _lazy("core.sprint_engine")
 if err4:
     st.error("Failed to import core.sprint_engine"); st.code(err4); st.stop()
+synth_utils, err5 = _lazy("core.synth_utils")
+if err5:
+    st.error("Failed to import core.synth_utils"); st.code(err5); st.stop()
 
 search_google_news = getattr(news_adapter, "search_google_news")
 fetch_articles_content = getattr(news_adapter, "fetch_articles_content")
@@ -40,13 +43,17 @@ build_campaign_brief = getattr(brief_engine, "build_campaign_brief")
 brief_to_markdown = getattr(brief_engine, "brief_to_markdown")
 gen_copy = getattr(copy_adapter, "generate")
 run_sprint = getattr(sprint_engine, "run_sprint")
+openai_key_diagnostics = getattr(synth_utils, "openai_key_diagnostics")
 
 with st.expander("Runtime", expanded=False):
     st.write({"python_version": sys.version})
     st.write({
         "news_adapter_path": getattr(news_adapter, "__file__", "n/a"),
         "news_adapter_version": getattr(news_adapter, "ADAPTER_VERSION", "n/a"),
+        "synth_utils_path": getattr(synth_utils, "__file__", "n/a"),
     })
+    st.markdown("**OpenAI key diagnostics (lengths only):**")
+    st.code(json.dumps(openai_key_diagnostics(), indent=2), language="json")
 
 # Load shared assets (traits, personas)
 assets_dir = Path("assets")
@@ -317,7 +324,6 @@ if variants:
                     return_cluster_df=True,
                 )
 
-                # New Streamlit plotting API prefers width='stretch'
                 try:
                     st.plotly_chart(fig, width="stretch")
                 except TypeError:
@@ -325,7 +331,8 @@ if variants:
 
                 st.markdown(summary)
 
-                mean_intent = float(np.mean(df["intent"])) if not df.empty else 0.0
+                import numpy as _np
+                mean_intent = float(_np.mean(df["intent"])) if not df.empty else 0.0
                 st.write(f"Mean intent this round: **{mean_intent:.2f}/10**")
                 if mean_intent >= float(threshold):
                     passed = True
